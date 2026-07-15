@@ -1,0 +1,6 @@
+{
+  "name": "City Explorer",
+  "description": "A mobile-optimized Android City Explorer application for discovering points of interest, planning itineraries, and generating customized local guides via the Gemini API.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
