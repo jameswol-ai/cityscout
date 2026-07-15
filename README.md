@@ -8,6 +8,9 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/a60daf2d-dda8-4965-b9b9-63b147a976b3
 
+or 
+https://cityscout.ai.studio
+
 ## Run Locally
 
 **Prerequisites:**  Node.js
