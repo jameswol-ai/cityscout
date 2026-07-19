@@ -1,8 +1,8 @@
 import streamlit as st
 import requests
-
-from folium.plugins import MarkerCluster, HeatMap
-from streamlit_folium import st_folium
+#import folium
+#from folium.plugins import #MarkerCluster, HeatMap
+#from streamlit_folium import st_folium
 import pandas as pd
 
 BASE_URL = "http://localhost:8000"  # Adjust if your backend runs elsewhere
