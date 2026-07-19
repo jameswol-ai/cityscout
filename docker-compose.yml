@@ -10,6 +10,12 @@ services:
     volumes:
       - ./backend:/app
     working_dir: /app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   frontend:
     build:
@@ -21,4 +27,5 @@ services:
       - .:/app
     working_dir: /app
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
