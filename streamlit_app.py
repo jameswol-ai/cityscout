@@ -1,151 +1,9 @@
-# --- Trip planner helpers (paste near other helpers) ---
-
-def compute_distance_matrix(places, mode="driving"):
-    """
-    Returns a matrix of (distance_km, duration_min) for each pair using OSRM.
-    Uses mem_cache via get_osrm_route.
-    """
-    n = len(places)
-    dist = [[None]*n for _ in range(n)]
-    dur = [[None]*n for _ in range(n)]
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                dist[i][j] = 0.0
-                dur[i][j] = 0.0
-                continue
-            a = places[i]
-            b = places[j]
-            coords, d_km, d_min = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode=mode)
-            dist[i][j] = d_km if d_km is not None else float("inf")
-            dur[i][j] = d_min if d_min is not None else float("inf")
-    return dist, dur
-
-def nearest_neighbor_order(dist_matrix, start_index=0):
-    """
-    Simple nearest neighbor ordering starting from start_index.
-    Returns list of indices in visiting order.
-    """
-    n = len(dist_matrix)
-    unvisited = set(range(n))
-    order = [start_index]
-    unvisited.remove(start_index)
-    current = start_index
-    while unvisited:
-        # pick nearest unvisited
-        next_idx = min(unvisited, key=lambda x: dist_matrix[current][x] if dist_matrix[current][x] is not None else float("inf"))
-        order.append(next_idx)
-        unvisited.remove(next_idx)
-        current = next_idx
-    return order
-
-def two_opt_improve(order, dist_matrix):
-    """
-    2-opt improvement on the order (open route).
-    """
-    improved = True
-    n = len(order)
-    if n <= 2:
-        return order
-    while improved:
-        improved = False
-        for i in range(1, n-2):
-            for j in range(i+1, n-1):
-                a, b = order[i-1], order[i]
-                c, d = order[j], order[j+1]
-                # current cost
-                cur = (dist_matrix[a][b] or float("inf")) + (dist_matrix[c][d] or float("inf"))
-                # swapped cost
-                new = (dist_matrix[a][c] or float("inf")) + (dist_matrix[b][d] or float("inf"))
-                if new + 1e-6 < cur:
-                    # reverse segment i..j
-                    order[i:j+1] = reversed(order[i:j+1])
-                    improved = True
-        if improved:
-            continue
-    return order
-
-def build_route_polyline_coords(order, places):
-    """
-    Fetch OSRM route segments for each consecutive pair and concatenate coordinates.
-    Returns coords list and totals (distance_km, duration_min).
-    """
-    all_coords = []
-    total_km = 0.0
-    total_min = 0.0
-    for idx in range(len(order)-1):
-        a = places[order[idx]]
-        b = places[order[idx+1]]
-        coords, d_km, d_min = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode="driving")
-        if coords:
-            # avoid duplicate point when concatenating
-            if all_coords and coords[0] == all_coords[-1]:
-                all_coords.extend(coords[1:])
-            else:
-                all_coords.extend(coords)
-        if d_km:
-            total_km += d_km
-        if d_min:
-            total_min += d_min
-    return all_coords, total_km, total_min
-
-# --- Trip Planner UI (insert into your tabs area) ---
-
-with st.expander("Trip Planner (optimize multi-stop routes)"):
-    st.markdown("<div class='card'><h4 style='margin:0;color:#e6e6e6'>Trip Planner</h4></div>", unsafe_allow_html=True)
-    # choose source of places
-    if not st.session_state.get("places"):
-        st.info("No saved places yet. Add places first.")
-    else:
-        # allow selecting subset
-        place_names = [f"{p['name']} — {p.get('category','')}" for p in st.session_state["places"]]
-        selected = st.multiselect("Select places to include (2+)", options=list(range(len(place_names))), format_func=lambda i: place_names[i])
-        if len(selected) < 2:
-            st.write("Select at least two places to plan a route.")
-        else:
-            start_choice = st.selectbox("Start from", options=selected, format_func=lambda i: place_names[i])
-            mode_choice = st.selectbox("Mode", ["driving", "walking", "cycling"], index=0)
-            if st.button("Compute optimized route"):
-                # build subset list
-                subset = [st.session_state["places"][i] for i in selected]
-                # compute distance matrix for subset
-                with st.spinner("Computing pairwise distances..."):
-                    dist_matrix, dur_matrix = compute_distance_matrix(subset, mode=mode_choice)
-                # nearest neighbor from chosen start index (map to subset index)
-                start_idx_in_subset = selected.index(start_choice)
-                order = nearest_neighbor_order(dist_matrix, start_index=start_idx_in_subset)
-                # improve with 2-opt
-                order = two_opt_improve(order, dist_matrix)
-                # map order back to original indices
-                ordered_places = [subset[i] for i in order]
-                # build route polyline and totals
-                coords, total_km, total_min = build_route_polyline_coords(order, subset)
-                # show summary
-                st.success(f"Route computed — {len(ordered_places)} stops, {total_km:.2f} km, {total_min:.1f} min (approx)")
-                # show ordered list with external links
-                st.markdown("**Ordered stops**")
-                for idx, p in enumerate(ordered_places, start=1):
-                    st.markdown(f"{idx}. **{p['name']}** — {p.get('category','')}")
-                    st.markdown(f"- Apple: {apple_maps_link(p['latitude'], p['longitude'])}  |  Google: {google_maps_link(p['latitude'], p['longitude'])}", unsafe_allow_html=True)
-                # draw map
-                if coords:
-                    route_map = folium.Map(location=coords[len(coords)//2], zoom_start=12)
-                    folium.PolyLine(coords, color=APP_PRIMARY, weight=5, opacity=0.85).add_to(route_map)
-                    # add markers in order
-                    for i, p in enumerate(ordered_places):
-                        folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']}", popup=p.get('description','')).add_to(route_map)
-                    folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
-                    folium.LayerControl().add_to(route_map)
-                    st_folium(route_map, width=900, height=500)
-                # export ordered CSV
-                df_ordered = pd.DataFrame(ordered_places)
-                csv = df_ordered.to_csv(index=False).encode("utf-8")
-                st.download_button("Export ordered stops (CSV)", data=csv, file_name="trip_order.csv", mime="text/csv")# streamlit_app.py
+# streamlit_app.py
 """
-CityScout - Single-file Streamlit app (updated)
+CityScout - Streamlit app with Trip Planner tab
 
-Features:
-- Centered SVG logo at the top of every page (only image asset)
+This file:
+- Centered SVG logo at top
 - Login / Sign up via FastAPI JWT auth server (AUTH_URL env var) with local fallback
 - Auto-creates a demo user (demo/demo123) in local fallback mode
 - Per-user persistent places stored in USER_DATA_DIR as JSON
@@ -155,8 +13,8 @@ Features:
 - External links: maps.apple.com, Google Maps, PetalMaps, Bing, OpenStreetMap
 - Interactive maps via folium + st_folium; tile layers include attribution
 - OSRM routing (driving/walking/cycling) with in-memory caching
+- Trip Planner as a dedicated tab (nearest-neighbor + 2-opt)
 - Black theme, fixed font, no appearance controls
-- CSV import/export and pairwise matrix
 """
 
 from __future__ import annotations
@@ -169,7 +27,7 @@ import requests
 import streamlit as st
 import folium
 import pandas as pd
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 
@@ -203,7 +61,6 @@ if "places" not in st.session_state:
 if "categories" not in st.session_state:
     st.session_state["categories"] = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "Transit", "Other"]
 if "auth_mode" not in st.session_state:
-    # "remote" when auth server used successfully, "local" when fallback to users.json
     st.session_state["auth_mode"] = None
 
 USERS_FILE = os.path.join(USER_DATA_DIR, "users.json")
@@ -516,6 +373,7 @@ def logout_user():
     st.session_state["access_token"] = None
     st.session_state["username"] = None
     st.session_state["places"] = []
+    st.session_state["auth_mode"] = None
 
 # -------------------------
 # Place helpers
@@ -553,34 +411,23 @@ def delete_place(place_id: str):
 # -------------------------
 # Explore backend helper (safe)
 # -------------------------
-
- def fetch_explore_from_backend(city: str, category: str):
-    """
-    Robust fetch for /explore.
-    - Tries the configured BACKEND_URL.
-    - If the backend is unreachable or returns unexpected data, returns a small local sample.
-    - Logs status and a short response snippet to the Streamlit UI for debugging.
-    """
+def fetch_explore_from_backend(city: str, category: str):
     sample = [
         {"name": "Central Park Cafe", "description": "Sample cafe for testing", "latitude": 0.3476, "longitude": 32.5825, "category": "Food", "url": ""},
         {"name": "Riverside Park", "description": "Sample park", "latitude": 0.3490, "longitude": 32.5800, "category": "Parks", "url": ""}
     ]
     try:
-        # Build request safely
         params = {}
         if city:
             params["city"] = city
         if category and category != "any":
             params["category"] = category
         resp = requests.get(f"{BASE_URL}/explore", params=params, timeout=8)
-        # If non-2xx, show info and fall back
         if resp.status_code < 200 or resp.status_code >= 300:
             st.warning(f"Explore backend returned status {resp.status_code}. Using sample results.")
-            # show a short snippet for debugging (not full body)
             snippet = resp.text[:400].replace("\n", " ")
             st.caption(f"Backend response snippet: {snippet}")
             return sample
-        # Parse JSON safely
         data = resp.json()
         if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
             results = data["results"]
@@ -593,9 +440,8 @@ def delete_place(place_id: str):
 
         normalized = []
         for r in results:
-            # Accept multiple possible field names
-            lat = r.get("latitude") or r.get("lat") or r.get("latitud") or None
-            lon = r.get("longitude") or r.get("lon") or r.get("lng") or None
+            lat = r.get("latitude") or r.get("lat") or None
+            lon = r.get("longitude") or r.get("lon") or None
             if lat is None or lon is None:
                 link = r.get("url") or r.get("link") or r.get("maps_link") or r.get("map_url") or ""
                 lat, lon = parse_map_link(link)
@@ -605,7 +451,6 @@ def delete_place(place_id: str):
                     r["longitude"] = float(lon)
                     normalized.append(r)
                 except Exception:
-                    # skip malformed coordinates
                     continue
         if not normalized:
             st.info("Explore backend returned no usable coordinates. Showing sample results.")
@@ -622,10 +467,82 @@ def delete_place(place_id: str):
         st.warning("Explore backend returned invalid JSON. Using sample results.")
         return sample
     except Exception as e:
-        # Catch-all: show a short error message and fallback
         st.error("Explore fetch failed: backend unreachable or returned unexpected data.")
         st.caption(f"Debug: {str(e)[:300]}")
-        return sample         
+        return sample
+
+# -------------------------
+# Trip Planner helpers (nearest neighbor + 2-opt)
+# -------------------------
+def compute_distance_matrix(places: List[dict], mode: str = "driving"):
+    n = len(places)
+    dist = [[float("inf")] * n for _ in range(n)]
+    dur = [[float("inf")] * n for _ in range(n)]
+    for i in range(n):
+        dist[i][i] = 0.0
+        dur[i][i] = 0.0
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            a = places[i]
+            b = places[j]
+            coords, d_km, d_min = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode=mode)
+            dist[i][j] = d_km if d_km is not None else float("inf")
+            dur[i][j] = d_min if d_min is not None else float("inf")
+    return dist, dur
+
+def nearest_neighbor_order(dist_matrix: List[List[float]], start_index: int = 0) -> List[int]:
+    n = len(dist_matrix)
+    unvisited = set(range(n))
+    order = [start_index]
+    unvisited.remove(start_index)
+    current = start_index
+    while unvisited:
+        next_idx = min(unvisited, key=lambda x: dist_matrix[current][x] if dist_matrix[current][x] is not None else float("inf"))
+        order.append(next_idx)
+        unvisited.remove(next_idx)
+        current = next_idx
+    return order
+
+def two_opt_improve(order: List[int], dist_matrix: List[List[float]]) -> List[int]:
+    improved = True
+    n = len(order)
+    if n <= 2:
+        return order
+    while improved:
+        improved = False
+        for i in range(1, n - 2):
+            for j in range(i + 1, n - 1):
+                a, b = order[i - 1], order[i]
+                c, d = order[j], order[j + 1]
+                cur = (dist_matrix[a][b] or float("inf")) + (dist_matrix[c][d] or float("inf"))
+                new = (dist_matrix[a][c] or float("inf")) + (dist_matrix[b][d] or float("inf"))
+                if new + 1e-6 < cur:
+                    order[i:j + 1] = list(reversed(order[i:j + 1]))
+                    improved = True
+        if improved:
+            continue
+    return order
+
+def build_route_polyline_coords(order: List[int], places: List[dict], mode: str = "driving"):
+    all_coords = []
+    total_km = 0.0
+    total_min = 0.0
+    for idx in range(len(order) - 1):
+        a = places[order[idx]]
+        b = places[order[idx + 1]]
+        coords, d_km, d_min = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode=mode)
+        if coords:
+            if all_coords and coords[0] == all_coords[-1]:
+                all_coords.extend(coords[1:])
+            else:
+                all_coords.extend(coords)
+        if d_km:
+            total_km += d_km
+        if d_min:
+            total_min += d_min
+    return all_coords, total_km, total_min
 
 # -------------------------
 # UI: centered logo and login (with fallback)
@@ -645,7 +562,6 @@ def show_login_page():
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<div class='small-muted'>Sign in or create an account to continue</div>", unsafe_allow_html=True)
 
-    # Ensure demo local user exists for fallback testing
     ensure_demo_local_user()
 
     username = st.text_input("Username", key="login_user", placeholder="username")
@@ -654,7 +570,6 @@ def show_login_page():
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("Login", key="btn_login"):
-            # Try remote auth first
             token = call_auth_login(username, password)
             if token:
                 info = verify_token(token)
@@ -668,7 +583,6 @@ def show_login_page():
                 else:
                     st.error("Login succeeded but token verification failed.")
                     return
-            # Remote failed -> try local fallback
             if verify_local_user(username, password):
                 st.session_state["access_token"] = None
                 st.session_state["username"] = username
@@ -679,7 +593,6 @@ def show_login_page():
                 st.error("Login failed. Check credentials or auth server.")
     with col2:
         if st.button("Sign up", key="btn_signup"):
-            # Try remote signup first
             token = call_auth_signup(username, password)
             if token:
                 info = verify_token(token)
@@ -693,7 +606,6 @@ def show_login_page():
                 else:
                     st.error("Sign up succeeded but token verification failed.")
                     return
-            # Remote signup failed -> create local user
             created = create_local_user(username, password)
             if created:
                 st.session_state["access_token"] = None
@@ -712,7 +624,6 @@ def main_app():
     inject_css()
     top_logo()
 
-    # Top controls
     cols = st.columns([3, 1])
     with cols[0]:
         st.markdown(f"<h2 style='margin:0;color:#e6e6e6'>CityScout</h2>", unsafe_allow_html=True)
@@ -721,7 +632,7 @@ def main_app():
             logout_user()
             st.experimental_rerun()
 
-    tabs = st.tabs(["Dashboard", "Explore", "Add Place", "Places", "Categories", "Settings"])
+    tabs = st.tabs(["Dashboard", "Explore", "Add Place", "Places", "Trip Planner", "Categories", "Settings"])
 
     # Dashboard
     with tabs[0]:
@@ -795,7 +706,7 @@ def main_app():
                     st.markdown(f"- [Open in Apple Maps]({apple_maps_link(lat_f, lon_f)})")
                     st.markdown(f"- [Open in Google Maps]({google_maps_link(lat_f, lon_f)})")
                     st.markdown(f"- [Open in PetalMaps]({petal_maps_link(lat_f, lon_f)})")
-                    st.markdown(f"- [Open in Bing Maps]({bing_maps_link(lat_f, lon_f)})")
+                    st.markdown(f"- [Open in Bing]({bing_maps_link(lat_f, lon_f)})")
                     st.markdown(f"- [Open in OpenStreetMap]({osm_link(lat_f, lon_f)})")
 
         st.markdown("**Interactive map** — click to pick coordinates.")
@@ -891,8 +802,47 @@ def main_app():
                         st.success("Updated favorite status")
                 st.write("---")
 
-    # Categories
+    # Trip Planner (dedicated tab)
     with tabs[4]:
+        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Trip Planner</h3></div>", unsafe_allow_html=True)
+        if not st.session_state.get("places"):
+            st.info("No saved places yet. Add places first.")
+        else:
+            place_names = [f"{p['name']} — {p.get('category','')}" for p in st.session_state["places"]]
+            selected_indices = st.multiselect("Select places to include (2+)", options=list(range(len(place_names))), format_func=lambda i: place_names[i])
+            if len(selected_indices) < 2:
+                st.write("Select at least two places to plan a route.")
+            else:
+                start_choice = st.selectbox("Start from", options=selected_indices, format_func=lambda i: place_names[i])
+                mode_choice = st.selectbox("Mode", ["driving", "walking", "cycling"], index=0)
+                if st.button("Compute optimized route"):
+                    subset = [st.session_state["places"][i] for i in selected_indices]
+                    with st.spinner("Computing pairwise distances..."):
+                        dist_matrix, dur_matrix = compute_distance_matrix(subset, mode=mode_choice)
+                    start_idx_in_subset = selected_indices.index(start_choice)
+                    order = nearest_neighbor_order(dist_matrix, start_index=start_idx_in_subset)
+                    order = two_opt_improve(order, dist_matrix)
+                    ordered_places = [subset[i] for i in order]
+                    coords, total_km, total_min = build_route_polyline_coords(order, subset, mode=mode_choice)
+                    st.success(f"Route computed — {len(ordered_places)} stops, {total_km:.2f} km, {total_min:.1f} min (approx)")
+                    st.markdown("**Ordered stops**")
+                    for idx, p in enumerate(ordered_places, start=1):
+                        st.markdown(f"{idx}. **{p['name']}** — {p.get('category','')}")
+                        st.markdown(f"- Apple: {apple_maps_link(p['latitude'], p['longitude'])}  |  Google: {google_maps_link(p['latitude'], p['longitude'])}", unsafe_allow_html=True)
+                    if coords:
+                        route_map = folium.Map(location=coords[len(coords)//2], zoom_start=12)
+                        folium.PolyLine(coords, color=APP_PRIMARY, weight=5, opacity=0.85).add_to(route_map)
+                        for i, p in enumerate(ordered_places):
+                            folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']}", popup=p.get('description','')).add_to(route_map)
+                        folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
+                        folium.LayerControl().add_to(route_map)
+                        st_folium(route_map, width=900, height=500)
+                    df_ordered = pd.DataFrame(ordered_places)
+                    csv = df_ordered.to_csv(index=False).encode("utf-8")
+                    st.download_button("Export ordered stops (CSV)", data=csv, file_name="trip_order.csv", mime="text/csv")
+
+    # Categories
+    with tabs[5]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Categories</h3></div>", unsafe_allow_html=True)
         st.write("Create, rename, or delete categories. Deleting moves places to 'Other'.")
         col1, col2 = st.columns([2,1])
@@ -919,7 +869,7 @@ def main_app():
         st.write(", ".join(st.session_state["categories"]))
 
     # Settings
-    with tabs[5]:
+    with tabs[6]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Settings</h3></div>", unsafe_allow_html=True)
         st.write(f"Logged in as: **{st.session_state.get('username') or 'guest'}**")
         st.write(f"Auth mode: **{st.session_state.get('auth_mode') or 'unknown'}**")
@@ -931,23 +881,19 @@ def main_app():
 # App entry
 # -------------------------
 def run():
-    # If token exists, verify remote token; if invalid, clear
     token = st.session_state.get("access_token")
     username = st.session_state.get("username")
     if token and username:
         info = verify_token(token)
         if not info or info.get("username") != username:
-            # remote token invalid -> clear
             st.session_state["access_token"] = None
             st.session_state["username"] = None
             st.session_state["auth_mode"] = None
 
-    # If no username, show login
     if not st.session_state.get("username"):
         show_login_page()
         return
 
-    # Ensure user's places loaded
     if st.session_state.get("username") and not st.session_state.get("places"):
         st.session_state["places"] = load_user_places(st.session_state["username"])
 
@@ -955,147 +901,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-# --- Trip planner helpers (paste near other helpers) ---
-
-def compute_distance_matrix(places, mode="driving"):
-    """
-    Returns a matrix of (distance_km, duration_min) for each pair using OSRM.
-    Uses mem_cache via get_osrm_route.
-    """
-    n = len(places)
-    dist = [[None]*n for _ in range(n)]
-    dur = [[None]*n for _ in range(n)]
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                dist[i][j] = 0.0
-                dur[i][j] = 0.0
-                continue
-            a = places[i]
-            b = places[j]
-            coords, d_km, d_min = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode=mode)
-            dist[i][j] = d_km if d_km is not None else float("inf")
-            dur[i][j] = d_min if d_min is not None else float("inf")
-    return dist, dur
-
-def nearest_neighbor_order(dist_matrix, start_index=0):
-    """
-    Simple nearest neighbor ordering starting from start_index.
-    Returns list of indices in visiting order.
-    """
-    n = len(dist_matrix)
-    unvisited = set(range(n))
-    order = [start_index]
-    unvisited.remove(start_index)
-    current = start_index
-    while unvisited:
-        # pick nearest unvisited
-        next_idx = min(unvisited, key=lambda x: dist_matrix[current][x] if dist_matrix[current][x] is not None else float("inf"))
-        order.append(next_idx)
-        unvisited.remove(next_idx)
-        current = next_idx
-    return order
-
-def two_opt_improve(order, dist_matrix):
-    """
-    2-opt improvement on the order (open route).
-    """
-    improved = True
-    n = len(order)
-    if n <= 2:
-        return order
-    while improved:
-        improved = False
-        for i in range(1, n-2):
-            for j in range(i+1, n-1):
-                a, b = order[i-1], order[i]
-                c, d = order[j], order[j+1]
-                # current cost
-                cur = (dist_matrix[a][b] or float("inf")) + (dist_matrix[c][d] or float("inf"))
-                # swapped cost
-                new = (dist_matrix[a][c] or float("inf")) + (dist_matrix[b][d] or float("inf"))
-                if new + 1e-6 < cur:
-                    # reverse segment i..j
-                    order[i:j+1] = reversed(order[i:j+1])
-                    improved = True
-        if improved:
-            continue
-    return order
-
-def build_route_polyline_coords(order, places):
-    """
-    Fetch OSRM route segments for each consecutive pair and concatenate coordinates.
-    Returns coords list and totals (distance_km, duration_min).
-    """
-    all_coords = []
-    total_km = 0.0
-    total_min = 0.0
-    for idx in range(len(order)-1):
-        a = places[order[idx]]
-        b = places[order[idx+1]]
-        coords, d_km, d_min = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode="driving")
-        if coords:
-            # avoid duplicate point when concatenating
-            if all_coords and coords[0] == all_coords[-1]:
-                all_coords.extend(coords[1:])
-            else:
-                all_coords.extend(coords)
-        if d_km:
-            total_km += d_km
-        if d_min:
-            total_min += d_min
-    return all_coords, total_km, total_min
-
-# --- Trip Planner UI (insert into your tabs area) ---
-
-with st.expander("Trip Planner (optimize multi-stop routes)"):
-    st.markdown("<div class='card'><h4 style='margin:0;color:#e6e6e6'>Trip Planner</h4></div>", unsafe_allow_html=True)
-    # choose source of places
-    if not st.session_state.get("places"):
-        st.info("No saved places yet. Add places first.")
-    else:
-        # allow selecting subset
-        place_names = [f"{p['name']} — {p.get('category','')}" for p in st.session_state["places"]]
-        selected = st.multiselect("Select places to include (2+)", options=list(range(len(place_names))), format_func=lambda i: place_names[i])
-        if len(selected) < 2:
-            st.write("Select at least two places to plan a route.")
-        else:
-            start_choice = st.selectbox("Start from", options=selected, format_func=lambda i: place_names[i])
-            mode_choice = st.selectbox("Mode", ["driving", "walking", "cycling"], index=0)
-            if st.button("Compute optimized route"):
-                # build subset list
-                subset = [st.session_state["places"][i] for i in selected]
-                # compute distance matrix for subset
-                with st.spinner("Computing pairwise distances..."):
-                    dist_matrix, dur_matrix = compute_distance_matrix(subset, mode=mode_choice)
-                # nearest neighbor from chosen start index (map to subset index)
-                start_idx_in_subset = selected.index(start_choice)
-                order = nearest_neighbor_order(dist_matrix, start_index=start_idx_in_subset)
-                # improve with 2-opt
-                order = two_opt_improve(order, dist_matrix)
-                # map order back to original indices
-                ordered_places = [subset[i] for i in order]
-                # build route polyline and totals
-                coords, total_km, total_min = build_route_polyline_coords(order, subset)
-                # show summary
-                st.success(f"Route computed — {len(ordered_places)} stops, {total_km:.2f} km, {total_min:.1f} min (approx)")
-                # show ordered list with external links
-                st.markdown("**Ordered stops**")
-                for idx, p in enumerate(ordered_places, start=1):
-                    st.markdown(f"{idx}. **{p['name']}** — {p.get('category','')}")
-                    st.markdown(f"- Apple: {apple_maps_link(p['latitude'], p['longitude'])}  |  Google: {google_maps_link(p['latitude'], p['longitude'])}", unsafe_allow_html=True)
-                # draw map
-                if coords:
-                    route_map = folium.Map(location=coords[len(coords)//2], zoom_start=12)
-                    folium.PolyLine(coords, color=APP_PRIMARY, weight=5, opacity=0.85).add_to(route_map)
-                    # add markers in order
-                    for i, p in enumerate(ordered_places):
-                        folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']}", popup=p.get('description','')).add_to(route_map)
-                    folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
-                    folium.LayerControl().add_to(route_map)
-                    st_folium(route_map, width=900, height=500)
-                # export ordered CSV
-                df_ordered = pd.DataFrame(ordered_places)
-                csv = df_ordered.to_csv(index=False).encode("utf-8")
-                st.download_button("Export ordered stops (CSV)", data=csv, file_name="trip_order.csv", mime="text/csv")
