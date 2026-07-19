@@ -1,21 +1,23 @@
-# Dockerfile
-FROM python:3.11-slim
+version: "3.9"
+services:
+  auth:
+    build: ./auth_server
+    environment:
+      - JWT_SECRET=change_this_secret
+      - AUTH_DB=/data/auth.db
+    volumes:
+      - ./auth_data:/data
+    ports:
+      - "8000:8000"
 
-WORKDIR /app
-
-# Install system deps for folium rendering
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8501
-
-EXPOSE 8501
-
-CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+  frontend:
+    build: .
+    environment:
+      - AUTH_URL=http://auth:8000
+      - USER_DATA_DIR=/data/user_data
+    volumes:
+      - ./user_data:/data/user_data
+    ports:
+      - "8501:8501"
+    depends_on:
+      - auth
