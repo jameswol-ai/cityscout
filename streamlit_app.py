@@ -1,3 +1,5 @@
+# streamlit_app.py
+import os
 import streamlit as st
 import requests
 import folium
@@ -5,27 +7,68 @@ from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 import pandas as pd
 import urllib.parse
+import base64
+import math
 
 # -------------------------
 # Configuration
 # -------------------------
-# Replace with your Google Maps API key (or leave empty to disable Google API calls)
-GOOGLE_API_KEY = "YOUR_API_KEY"
-
-# Backend base URL (adjust if backend runs elsewhere or inside Docker)
-BASE_URL = "http://localhost:8000"
+# Prefer environment variable for security
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_API_KEY")
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
 
-# Initialize session state
+# -------------------------
+# Session state
+# -------------------------
 if "favorites" not in st.session_state:
     st.session_state["favorites"] = []
 
 # -------------------------
-# Google Maps helpers
+# Utility: decode Google polyline
+# -------------------------
+def decode_polyline(polyline_str):
+    """Decodes a polyline that was encoded using the Google Encoded Polyline Algorithm Format.
+    Returns list of (lat, lon) tuples.
+    """
+    if not polyline_str:
+        return []
+    index, lat, lng = 0, 0, 0
+    coordinates = []
+    length = len(polyline_str)
+
+    while index < length:
+        shift, result = 0, 0
+        while True:
+            b = ord(polyline_str[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        dlat = ~(result >> 1) if (result & 1) else (result >> 1)
+        lat += dlat
+
+        shift, result = 0, 0
+        while True:
+            b = ord(polyline_str[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        dlng = ~(result >> 1) if (result & 1) else (result >> 1)
+        lng += dlng
+
+        coordinates.append((lat / 1e5, lng / 1e5))
+    return coordinates
+
+# -------------------------
+# Google Places & Directions helpers
 # -------------------------
 def enrich_place_with_google(name: str, city: str):
-    """Use Google Places Text Search to fetch basic enrichment (rating, formatted address, photo ref)."""
+    """Use Google Places Text Search to fetch basic enrichment (rating, formatted address, place_id, photo ref)."""
     if not GOOGLE_API_KEY or not name:
         return {}
     try:
@@ -43,9 +86,24 @@ def enrich_place_with_google(name: str, city: str):
                 "google_photo_ref": (place.get("photos") or [{}])[0].get("photo_reference")
             }
     except Exception:
-        # Fail silently for enrichment to avoid breaking the app
         return {}
     return {}
+
+def fetch_place_photo(photo_ref: str, maxwidth: int = 400):
+    """Fetch a photo from Google Places Photo API and return a data URI (base64) for embedding in Streamlit."""
+    if not GOOGLE_API_KEY or not photo_ref:
+        return None
+    try:
+        url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth={maxwidth}&photoreference={photo_ref}&key={GOOGLE_API_KEY}"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        # The Places Photo endpoint returns a redirect to the actual image; requests follows it and returns image bytes.
+        img_bytes = resp.content
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        mime = "image/jpeg"
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
 
 def google_maps_link(lat: float, lon: float):
     """Return a Google Maps search link for coordinates."""
@@ -56,6 +114,23 @@ def google_directions_link(origin_lat, origin_lon, dest_lat, dest_lon):
     origin = f"{origin_lat},{origin_lon}"
     dest = f"{dest_lat},{dest_lon}"
     return f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={dest}"
+
+def get_directions_polyline(origin_lat, origin_lon, dest_lat, dest_lon):
+    """Call Google Directions API and return overview_polyline string (if available)."""
+    if not GOOGLE_API_KEY:
+        return None
+    try:
+        origin = f"{origin_lat},{origin_lon}"
+        dest = f"{dest_lat},{dest_lon}"
+        url = f"https://maps.googleapis.com/maps/api/directions/json?origin={origin}&destination={dest}&key={GOOGLE_API_KEY}"
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("routes"):
+            return data["routes"][0]["overview_polyline"]["points"]
+    except Exception:
+        return None
+    return None
 
 def embed_google_map_iframe(lat: float, lon: float, zoom: int = 14, width: int = 700, height: int = 500):
     """Embed a Google Maps iframe centered on lat/lon. Requires GOOGLE_API_KEY."""
@@ -70,7 +145,7 @@ def embed_google_map_iframe(lat: float, lon: float, zoom: int = 14, width: int =
 # UI
 # -------------------------
 st.title("🌆 CityScout")
-st.markdown("Explore cities with AI-powered insights, maps, clustering, heatmaps, filters, sorting, and Google Maps integration.")
+st.markdown("Explore cities with AI-powered insights, maps, clustering, heatmaps, Google Places photos, and Directions polylines.")
 
 tab1, tab2 = st.tabs(["🔍 Explore", "⭐ Favorites"])
 
@@ -87,13 +162,13 @@ with tab1:
     sort_option = st.sidebar.selectbox("Sort results by", ["None", "Rating (High → Low)", "Price (Low → High)", "Price (High → Low)", "Distance (Near → Far)"])
 
     if st.sidebar.button("Explore"):
-        # Health-check backend first (optional)
+        # Check backend health
         try:
             health_resp = requests.get(f"{BASE_URL}/ping", timeout=3)
             if health_resp.status_code != 200:
                 st.warning("Backend ping returned non-200. Proceeding to /explore may fail.")
         except Exception:
-            st.error("Backend not reachable. Start the backend or update BASE_URL.")
+            st.error("Backend not reachable. Start the backend or update BACKEND_URL.")
             st.stop()
 
         try:
@@ -148,18 +223,17 @@ with tab1:
                         st.write(f"🌍 Google Rating: {extra['google_rating']}")
                     if extra.get("google_address"):
                         st.write(f"📍 Google Address: {extra['google_address']}")
+                    if extra.get("google_photo_ref"):
+                        photo_data_uri = fetch_place_photo(extra["google_photo_ref"], maxwidth=400)
+                        if photo_data_uri:
+                            st.image(photo_data_uri, width=300)
                 except Exception:
                     pass
 
                 # Add to favorites
                 add_key = f"addfav_{item.get('id', item.get('name'))}"
                 if st.button(f"Add to Favorites: {item.get('name','Unknown')}", key=add_key):
-                    # Ensure coordinates exist
-                    if "latitude" not in item or "longitude" not in item:
-                        st.warning("Item has no coordinates and cannot be added to map-based favorites, but will still be saved.")
-                    # Default tag
                     item.setdefault("tag", "None")
-                    # Merge enrichment if available
                     try:
                         enrichment = enrich_place_with_google(item.get("name", ""), city)
                         item.update({k: v for k, v in enrichment.items() if v})
@@ -203,14 +277,13 @@ with tab1:
 with tab2:
     st.subheader("⭐ Your Favorites")
 
-    # Import favorites CSV uploader (top of tab)
+    # Import favorites CSV uploader
     st.subheader("📤 Import Favorites from CSV")
     uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"], key="import_csv")
     if uploaded_file is not None:
         try:
             imported_df = pd.read_csv(uploaded_file)
             imported_records = imported_df.to_dict(orient="records")
-            # Ensure each imported record has a tag field
             for rec in imported_records:
                 rec.setdefault("tag", rec.get("tag", "None"))
             st.session_state["favorites"].extend(imported_records)
@@ -221,14 +294,11 @@ with tab2:
     if not st.session_state["favorites"]:
         st.info("No favorites saved yet.")
     else:
-        # Search and tag filter
         search_query = st.text_input("🔎 Search favorites by name", key="fav_search")
-        # Build dynamic tag list from favorites
         tags = sorted({fav.get("tag", "None") for fav in st.session_state["favorites"]})
         tag_options = ["All"] + [t for t in tags if t]
         tag_filter = st.selectbox("🏷️ Filter by tag", tag_options, index=0, key="fav_tag_filter")
 
-        # Filter favorites
         favorites_to_show = st.session_state["favorites"]
         if search_query:
             favorites_to_show = [fav for fav in favorites_to_show if search_query.lower() in fav.get("name", "").lower()]
@@ -238,7 +308,7 @@ with tab2:
         if not favorites_to_show:
             st.warning("No favorites match your search or tag filter.")
         else:
-            # Display favorites list with tagging and Google Maps links/iframe
+            # Display favorites list with tagging, photos, maps, and directions
             for idx, fav in enumerate(favorites_to_show):
                 st.markdown(f"**{fav.get('name','Unknown')}**")
                 if fav.get("description"):
@@ -252,10 +322,16 @@ with tab2:
                 if fav.get("google_address"):
                     st.write(f"📍 {fav.get('google_address')}")
 
+                # Photo (if available)
+                photo_uri = None
+                if fav.get("google_photo_ref"):
+                    photo_uri = fetch_place_photo(fav["google_photo_ref"], maxwidth=600)
+                if photo_uri:
+                    st.image(photo_uri, width=400)
+
                 # Tagging UI
                 current_tag = fav.get("tag", "None")
                 tag_choices = ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"]
-                # Ensure current tag is in choices
                 if current_tag not in tag_choices:
                     tag_choices.append(current_tag)
                 new_tag = st.selectbox(f"Assign a tag to {fav.get('name','Unknown')}", tag_choices, index=tag_choices.index(current_tag), key=f"tag_{idx}")
@@ -272,23 +348,35 @@ with tab2:
                 if "latitude" in fav and "longitude" in fav:
                     maps_url = google_maps_link(fav["latitude"], fav["longitude"])
                     st.markdown(f"[🌍 View on Google Maps]({maps_url})")
-                    # Embed map (only one iframe per favorite to avoid heavy load)
                     try:
                         embed_google_map_iframe(fav["latitude"], fav["longitude"])
                     except Exception:
                         pass
 
-                # Directions: allow selecting another favorite as destination
+                # Directions: choose another favorite as destination and draw polyline on a small map
                 if "latitude" in fav and "longitude" in fav and len(st.session_state["favorites"]) > 1:
-                    # Build a list of other favorites to route to
                     other_favs = [f for f in st.session_state["favorites"] if f is not fav and "latitude" in f and "longitude" in f]
                     if other_favs:
                         dest_names = [f"{o.get('name','Unknown')} ({o.get('tag','')})" for o in other_favs]
-                        dest_index = st.selectbox(f"Get directions from {fav.get('name','Unknown')} to:", ["Select destination"] + dest_names, key=f"dir_select_{idx}")
-                        if dest_index and dest_index != "Select destination":
-                            chosen = other_favs[dest_names.index(dest_index)]
+                        dest_choice = st.selectbox(f"Get directions from {fav.get('name','Unknown')} to:", ["Select destination"] + dest_names, key=f"dir_select_{idx}")
+                        if dest_choice and dest_choice != "Select destination":
+                            chosen = other_favs[dest_names.index(dest_choice)]
+                            # Get directions polyline
+                            polyline_str = get_directions_polyline(fav["latitude"], fav["longitude"], chosen["latitude"], chosen["longitude"])
                             dir_link = google_directions_link(fav["latitude"], fav["longitude"], chosen["latitude"], chosen["longitude"])
                             st.markdown(f"[🧭 Open directions in Google Maps]({dir_link})")
+                            if polyline_str:
+                                coords = decode_polyline(polyline_str)
+                                # Draw on a Folium map
+                                mid_lat, mid_lon = coords[len(coords)//2] if coords else (fav["latitude"], fav["longitude"])
+                                route_map = folium.Map(location=[mid_lat, mid_lon], zoom_start=13)
+                                folium.PolyLine(locations=coords, color="blue", weight=5, opacity=0.7).add_to(route_map)
+                                # Mark origin and destination
+                                folium.Marker([fav["latitude"], fav["longitude"]], tooltip="Origin", icon=folium.Icon(color="green")).add_to(route_map)
+                                folium.Marker([chosen["latitude"], chosen["longitude"]], tooltip="Destination", icon=folium.Icon(color="red")).add_to(route_map)
+                                st_folium(route_map, width=700, height=400)
+                            else:
+                                st.info("Could not fetch route polyline from Google Directions API.")
 
                 st.write("---")
 
@@ -321,4 +409,4 @@ with tab2:
 # Footer / Notes
 # -------------------------
 st.markdown("---")
-st.caption("Tip: Set your GOOGLE_API_KEY at the top of this file to enable Places enrichment and embedded Google Maps.")
+st.caption("Tip: Set your GOOGLE_API_KEY as an environment variable to enable Places enrichment, photos, Directions, and embedded Google Maps.")
