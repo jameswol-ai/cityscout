@@ -1,21 +1,19 @@
 # streamlit_app.py
 """
-CityScout - Streamlit app (OpenStreetMap + OSRM)
-Features:
-- Login / Sign up (file-backed, hashed passwords)
-- Add places by name + latitude/longitude OR paste a map link OR click on interactive map
-- Modern / Classic UI toggle
-- Single SVG logo on login screen
-- Animated buttons via CSS
-- Interactive Folium maps (st_folium) with clustering, heatmap, OSRM routing (driving/walking/cycling)
-- Lightweight in-memory cache for OSRM calls
+CityScout (updated)
+- Only map-link input (Google Maps, OpenStreetMap, PetalMaps, etc.)
+- Interactive maps (st_folium) — click to pick coords
+- Background color, font, and primary color controls
+- Unique logo-only login/signup page
+- Animated buttons and modern/classic themes
+- OSRM routing (driving/walking/cycling) with in-memory caching
 """
 
 import os
+import re
 import json
 import time
 import hashlib
-import re
 import streamlit as st
 import requests
 import folium
@@ -26,14 +24,14 @@ import pandas as pd
 # -------------------------
 # Configuration
 # -------------------------
-BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")  # optional backend for /explore
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 USERS_FILE = os.getenv("USERS_FILE", "users.json")
 OSRM_ROUTE_TTL = 3600  # seconds
 
 st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
 
 # -------------------------
-# Session state defaults
+# Session defaults
 # -------------------------
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -43,6 +41,12 @@ if "favorites" not in st.session_state:
     st.session_state["favorites"] = []
 if "ui_theme" not in st.session_state:
     st.session_state["ui_theme"] = "modern"
+if "primary_color" not in st.session_state:
+    st.session_state["primary_color"] = "#0b6efd"
+if "bg_color" not in st.session_state:
+    st.session_state["bg_color"] = "#ffffff"
+if "font_choice" not in st.session_state:
+    st.session_state["font_choice"] = "Inter"
 
 # -------------------------
 # Simple user store (file-backed)
@@ -154,44 +158,51 @@ def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
     return [], None, None
 
 # -------------------------
-# Map link parsing (Google Maps and OpenStreetMap)
+# Map link parsing (Google, OSM, PetalMaps, generic)
 # -------------------------
 def parse_map_link(url: str):
     """
-    Extract (lat, lon) from common Google Maps and OpenStreetMap link formats.
+    Extract (lat, lon) from common Google Maps, OpenStreetMap, PetalMaps and generic link patterns.
     Returns (lat, lon) or (None, None) if not found.
     """
     if not url or not isinstance(url, str):
         return None, None
-    url = url.strip()
-    # Google Maps @lat,lon,zoom pattern
-    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    s = url.strip()
+    # Google Maps @lat,lon pattern
+    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
     # Google Maps q=lat,lon
-    m = re.search(r'[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    m = re.search(r'[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
     # OpenStreetMap mlat/mlon
-    m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', url)
+    m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
     # OSM #map=zoom/lat/lon
-    m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', url)
+    m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
-    # fallback: look for two floats separated by comma anywhere
-    m = re.search(r'(-?\d+\.\d+)[, ]+(-?\d+\.\d+)', url)
+    # Petal Maps common pattern (petal maps may include @lat,lon or /place/lat,lon)
+    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    m = re.search(r'/place/(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # Generic fallback: first two floats separated by comma
+    m = re.search(r'(-?\d+\.\d+)[, ]+(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
     return None, None
 
 # -------------------------
-# SVG logo (single)
+# SVG logo (single, centered)
 # -------------------------
 APP_SVG_LOGO = """
-<svg width="120" height="120" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <rect rx="16" width="100" height="100" fill="#0b6efd"/>
+<svg width="160" height="160" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <rect rx="18" width="100" height="100" fill="{color}"/>
   <g transform="translate(18,18)" fill="#fff">
     <path d="M12 2c-5.5 0-10 4.5-10 10 0 7.5 10 18 10 18s10-10.5 10-18c0-5.5-4.5-10-10-10z"/>
     <circle cx="12" cy="12" r="3"/>
@@ -200,80 +211,95 @@ APP_SVG_LOGO = """
 """
 
 # -------------------------
-# CSS: modern/classic + animated buttons
+# CSS injection helpers
 # -------------------------
-MODERN_CSS = """
-<style>
-.card { background: linear-gradient(180deg,#ffffff 0%,#f7fbff 100%); border-radius:12px; padding:14px; box-shadow:0 6px 18px rgba(11,110,253,0.08); margin-bottom:12px; }
-.header-row {display:flex; align-items:center; gap:12px;}
-.logo {width:64px; height:64px;}
-.small-muted {color:#6b7280; font-size:0.9rem;}
-.btn-animated {
-  background:#0b6efd; color:white; padding:10px 14px; border-radius:10px; border:none; cursor:pointer;
-  box-shadow: 0 6px 18px rgba(11,110,253,0.12);
-  transform: translateY(0);
-  animation: float 3s ease-in-out infinite;
-}
-@keyframes float {
-  0% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
-  100% { transform: translateY(0); }
-}
-.small-ghost { background:transparent; border:1px solid #0b6efd; color:#0b6efd; padding:8px 12px; border-radius:8px; cursor:pointer; }
-</style>
-"""
+def inject_css(primary_color="#0b6efd", bg_color="#ffffff", font_family="Inter"):
+    # Google Fonts links for simple fonts
+    font_links = {
+        "Inter": "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap",
+        "Roboto": "https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap",
+        "Lato": "https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap",
+        "System": ""
+    }
+    if font_family in font_links and font_links[font_family]:
+        st.markdown(f"<link href='{font_links[font_family]}' rel='stylesheet'>", unsafe_allow_html=True)
+    # CSS
+    css = f"""
+    <style>
+    :root {{
+      --primary: {primary_color};
+      --bg: {bg_color};
+      --font: {'"'+font_family+'", sans-serif' if font_family!='System' else 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial'};
+    }}
+    html, body, .stApp {{
+      background: var(--bg) !important;
+      font-family: var(--font) !important;
+    }}
+    .card {{
+      background: rgba(255,255,255,0.9);
+      border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+      margin-bottom: 12px;
+    }}
+    .logo-center {{ display:flex; align-items:center; justify-content:center; padding:40px 0; }}
+    .btn-animated {{
+      background: var(--primary);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 8px 24px rgba(11,110,253,0.12);
+      transform: translateY(0);
+      animation: float 3s ease-in-out infinite;
+    }}
+    @keyframes float {{
+      0% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-6px); }}
+      100% {{ transform: translateY(0); }}
+    }}
+    .small-muted {{ color: #6b7280; font-size:0.95rem; }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
 
-CLASSIC_CSS = """
-<style>
-.card { background:#fff; border-radius:6px; padding:10px; border:1px solid #e6e6e6; margin-bottom:10px; }
-.header-row {display:flex; align-items:center; gap:10px;}
-.logo {width:56px; height:56px;}
-.btn-animated { background:#0b6efd; color:white; padding:8px 12px; border-radius:6px; border:none; cursor:pointer; animation: pulse 2.5s infinite; }
-@keyframes pulse { 0% { box-shadow: 0 0 0 rgba(11,110,253,0.2);} 70% { box-shadow: 0 0 20px rgba(11,110,253,0);} 100% { box-shadow: 0 0 0 rgba(11,110,253,0);} }
-</style>
-"""
-
 # -------------------------
-# Authentication UI (file-backed)
+# Authentication UI (logo-only page)
 # -------------------------
-def show_login_signup():
-    st.markdown("<div style='display:flex;align-items:center;gap:16px'>", unsafe_allow_html=True)
-    st.markdown(f"<div class='logo'>{APP_SVG_LOGO}</div>", unsafe_allow_html=True)
-    st.markdown("<div><h2 style='margin:0'>CityScout</h2><div class='small-muted'>Open maps, routes, favorites</div></div>", unsafe_allow_html=True)
+def show_logo_only_login():
+    # Unique logo page: only logo and minimal login/signup controls
+    inject_css(primary_color=st.session_state["primary_color"], bg_color=st.session_state["bg_color"], font_family=st.session_state["font_choice"])
+    svg = APP_SVG_LOGO.format(color=st.session_state["primary_color"])
+    st.markdown("<div class='logo-center'>", unsafe_allow_html=True)
+    st.markdown(svg, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
-    st.write("---")
-    col1, col2 = st.columns(2)
+    st.markdown("<div style='text-align:center; margin-bottom:8px;'><div class='small-muted'>Sign in to continue</div></div>", unsafe_allow_html=True)
+    # compact login form
+    username = st.text_input("Username", key="login_user", placeholder="username")
+    password = st.text_input("Password", type="password", key="login_pass", placeholder="password")
+    col1, col2 = st.columns([1,1])
     with col1:
-        st.subheader("Login")
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pass")
         if st.button("Login", key="btn_login"):
             users = load_users()
             if username in users and users[username]["password_hash"] == _hash_password(password):
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
-                st.success("Logged in")
                 st.experimental_rerun()
             else:
                 st.error("Invalid username or password")
     with col2:
-        st.subheader("Sign up")
-        new_user = st.text_input("Choose username", key="signup_user")
-        new_pass = st.text_input("Choose password", type="password", key="signup_pass")
-        confirm_pass = st.text_input("Confirm password", type="password", key="signup_confirm")
         if st.button("Sign up", key="btn_signup"):
-            if not new_user or not new_pass:
+            if not username or not password:
                 st.error("Provide username and password")
-            elif new_pass != confirm_pass:
-                st.error("Passwords do not match")
             else:
                 users = load_users()
-                if new_user in users:
-                    st.error("Username already exists")
+                if username in users:
+                    st.error("Username exists")
                 else:
-                    users[new_user] = {"password_hash": _hash_password(new_pass)}
+                    users[username] = {"password_hash": _hash_password(password)}
                     save_users(users)
-                    st.success("Account created. You can now log in.")
+                    st.success("Account created. Log in now.")
 
 # -------------------------
 # Top bar and main app
@@ -281,9 +307,10 @@ def show_login_signup():
 def top_bar():
     cols = st.columns([1, 3, 1])
     with cols[0]:
-        st.markdown(APP_SVG_LOGO, unsafe_allow_html=True)
+        svg = APP_SVG_LOGO.format(color=st.session_state["primary_color"])
+        st.markdown(svg, unsafe_allow_html=True)
     with cols[1]:
-        st.markdown("<h3 style='margin:0'>CityScout</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='margin:0'>CityScout</h3>", unsafe_allow_html=True)
     with cols[2]:
         if st.session_state["logged_in"]:
             if st.button("Logout", key="btn_logout"):
@@ -292,21 +319,29 @@ def top_bar():
                 st.experimental_rerun()
 
 def main_app():
-    # inject CSS
-    if st.session_state["ui_theme"] == "modern":
-        st.markdown(MODERN_CSS, unsafe_allow_html=True)
-    else:
-        st.markdown(CLASSIC_CSS, unsafe_allow_html=True)
+    # inject CSS with current choices
+    inject_css(primary_color=st.session_state["primary_color"], bg_color=st.session_state["bg_color"], font_family=st.session_state["font_choice"])
 
     top_bar()
-    theme_col1, theme_col2 = st.columns([1, 3])
-    with theme_col1:
-        theme_choice = st.radio("UI style", ["modern", "classic"], index=0 if st.session_state["ui_theme"] == "modern" else 1, horizontal=True, key="ui_style_radio")
-        st.session_state["ui_theme"] = theme_choice
 
-    tab1, tab2, tab3 = st.tabs(["🔍 Explore", "➕ Add Place", "⭐ Favorites"])
+    # Controls for background color, primary color, font
+    with st.expander("Appearance (font, primary color, background)"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            font = st.selectbox("Font", ["Inter", "Roboto", "Lato", "System"], index=["Inter","Roboto","Lato","System"].index(st.session_state["font_choice"]) if st.session_state["font_choice"] in ["Inter","Roboto","Lato","System"] else 0)
+            st.session_state["font_choice"] = font
+        with col2:
+            primary = st.color_picker("Primary color", st.session_state["primary_color"])
+            st.session_state["primary_color"] = primary
+        with col3:
+            bg = st.color_picker("Background color", st.session_state["bg_color"])
+            st.session_state["bg_color"] = bg
+        # re-inject CSS immediately
+        inject_css(primary_color=st.session_state["primary_color"], bg_color=st.session_state["bg_color"], font_family=st.session_state["font_choice"])
 
-    # Explore tab (basic backend call optional)
+    tab1, tab2, tab3 = st.tabs(["🔍 Explore", "➕ Add Place (link or map click)", "⭐ Favorites"])
+
+    # Explore tab (optional backend)
     with tab1:
         st.markdown("<div class='card'><h4 style='margin:0'>Explore</h4></div>", unsafe_allow_html=True)
         st.sidebar.header("Search Options")
@@ -331,36 +366,24 @@ def main_app():
                         st.session_state["favorites"].append(item)
                         st.success("Added to favorites")
 
-    # Add Place tab
+    # Add Place tab (map link only + map click)
     with tab2:
         st.markdown("<div class='card'><h4 style='margin:0'>Add a Place</h4></div>", unsafe_allow_html=True)
-        st.write("You can add a place by **name + coordinates**, **paste a map link**, or **click on the interactive map** below.")
+        st.write("Provide a **map link** (Google Maps, OpenStreetMap, PetalMaps, etc.) or click on the interactive map below to pick a location.")
         with st.form("add_place_form"):
             name = st.text_input("Place name", "")
-            lat = st.text_input("Latitude (decimal) — leave blank if using link or map click", "")
-            lon = st.text_input("Longitude (decimal) — leave blank if using link or map click", "")
-            map_link = st.text_input("Or paste a Google Maps / OpenStreetMap link (optional)", "")
+            map_link = st.text_input("Map link (paste here)", "")
             description = st.text_area("Short description (optional)", "")
             tag = st.selectbox("Tag", ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"])
             if tag == "Custom":
                 tag = st.text_input("Custom tag name", key="custom_tag_input")
-            submitted = st.form_submit_button("Add place", help="Add the place to your favorites")
-            # animated button style via markdown (visual only)
+            submitted = st.form_submit_button("Add place from link or map click")
             if submitted:
-                lat_f = None
-                lon_f = None
-                # try parse link first
+                lat_f, lon_f = None, None
                 if map_link:
                     lat_f, lon_f = parse_map_link(map_link)
-                # then try direct inputs
-                if (lat and lon) and (lat_f is None or lon_f is None):
-                    try:
-                        lat_f = float(lat)
-                        lon_f = float(lon)
-                    except Exception:
-                        lat_f, lon_f = None, None
                 if lat_f is None or lon_f is None:
-                    st.error("Could not determine coordinates. Provide valid lat/lon or a map link or click on the map below.")
+                    st.error("Could not extract coordinates from the link. Try a different link or click on the map below.")
                 else:
                     place = {
                         "name": name or f"Place {len(st.session_state['favorites'])+1}",
@@ -372,8 +395,8 @@ def main_app():
                     st.session_state["favorites"].append(place)
                     st.success("Place added to favorites")
 
-        st.markdown("**Interactive map** — click to pick coordinates (click once to set).")
-        # show an interactive map centered on last favorite or default
+        st.markdown("**Interactive map** — click to pick coordinates (last click shown below).")
+        # center map on last favorite or default
         if st.session_state["favorites"]:
             center = st.session_state["favorites"][-1]
             center_lat, center_lon = center.get("latitude", 0), center.get("longitude", 0)
@@ -383,15 +406,14 @@ def main_app():
         folium.TileLayer('OpenStreetMap').add_to(m)
         folium.TileLayer('Stamen Terrain').add_to(m)
         folium.LayerControl().add_to(m)
-        map_result = st_folium(m, width=700, height=450)
-        # st_folium returns last_clicked
+        map_result = st_folium(m, width=800, height=450)
         last_click = map_result.get("last_clicked")
         if last_click:
             st.info(f"Map clicked at: {last_click['lat']:.6f}, {last_click['lng']:.6f}")
-            if st.button("Use clicked coordinates to add a new place", key="use_click_add"):
-                name_click = st.text_input("Name for clicked place", value=f"Place {len(st.session_state['favorites'])+1}", key="name_click")
+            if st.button("Add place at clicked location", key="use_click_add"):
+                place_name = st.text_input("Name for clicked place", value=f"Place {len(st.session_state['favorites'])+1}", key="name_click")
                 place = {
-                    "name": name_click or f"Place {len(st.session_state['favorites'])+1}",
+                    "name": place_name or f"Place {len(st.session_state['favorites'])+1}",
                     "latitude": float(last_click["lat"]),
                     "longitude": float(last_click["lng"]),
                     "description": "",
@@ -404,7 +426,7 @@ def main_app():
     with tab3:
         st.markdown("<div class='card'><h4 style='margin:0'>Your Favorites</h4></div>", unsafe_allow_html=True)
         if not st.session_state["favorites"]:
-            st.info("No favorites yet. Add places from Add Place or Explore.")
+            st.info("No favorites yet. Add places from Add Place.")
         else:
             search_query = st.text_input("Search favorites by name", key="fav_search")
             tags = sorted({fav.get("tag", "None") for fav in st.session_state["favorites"]})
@@ -436,7 +458,7 @@ def main_app():
                 else:
                     fav["tag"] = new_tag
 
-                # OSRM directions
+                # OSRM directions (choose destination)
                 if "latitude" in fav and "longitude" in fav and len(st.session_state["favorites"]) > 1:
                     other_favs = [f for f in st.session_state["favorites"] if f is not fav and "latitude" in f and "longitude" in f]
                     if other_favs:
@@ -451,7 +473,7 @@ def main_app():
                             if coords:
                                 mid_lat, mid_lon = coords[len(coords)//2]
                                 route_map = folium.Map(location=[mid_lat, mid_lon], zoom_start=13)
-                                folium.PolyLine(coords, color="blue", weight=5, opacity=0.7).add_to(route_map)
+                                folium.PolyLine(coords, color=st.session_state["primary_color"], weight=5, opacity=0.8).add_to(route_map)
                                 folium.Marker([fav["latitude"], fav["longitude"]], tooltip="Origin", icon=folium.Icon(color="green")).add_to(route_map)
                                 folium.Marker([chosen["latitude"], chosen["longitude"]], tooltip="Destination", icon=folium.Icon(color="red")).add_to(route_map)
                                 folium.TileLayer('OpenStreetMap').add_to(route_map)
@@ -494,7 +516,6 @@ def main_app():
                 folium.LayerControl().add_to(fav_map)
                 st.subheader("Favorites Map (interactive)")
                 map_out = st_folium(fav_map, width=900, height=500)
-                # show last clicked on favorites map
                 last = map_out.get("last_clicked")
                 if last:
                     st.info(f"Map clicked at: {last['lat']:.6f}, {last['lng']:.6f}")
@@ -553,11 +574,9 @@ def main_app():
 # App entry
 # -------------------------
 def run():
+    # If not logged in, show logo-only login page
     if not st.session_state["logged_in"]:
-        # show login/signup
-        st.markdown("<div style='max-width:900px;margin:auto'>", unsafe_allow_html=True)
-        show_login_signup()
-        st.markdown("</div>", unsafe_allow_html=True)
+        show_logo_only_login()
         return
     main_app()
 
