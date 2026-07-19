@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-import folium
+
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 import pandas as pd
