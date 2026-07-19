@@ -411,27 +411,79 @@ def delete_place(place_id: str):
 # -------------------------
 # Explore backend helper (safe)
 # -------------------------
-def fetch_explore_from_backend(city: str, category: str):
+
+ def fetch_explore_from_backend(city: str, category: str):
+    """
+    Robust fetch for /explore.
+    - Tries the configured BACKEND_URL.
+    - If the backend is unreachable or returns unexpected data, returns a small local sample.
+    - Logs status and a short response snippet to the Streamlit UI for debugging.
+    """
+    sample = [
+        {"name": "Central Park Cafe", "description": "Sample cafe for testing", "latitude": 0.3476, "longitude": 32.5825, "category": "Food", "url": ""},
+        {"name": "Riverside Park", "description": "Sample park", "latitude": 0.3490, "longitude": 32.5800, "category": "Parks", "url": ""}
+    ]
     try:
-        resp = requests.get(f"{BASE_URL}/explore", params={"city": city, "category": category}, timeout=10)
-        resp.raise_for_status()
+        # Build request safely
+        params = {}
+        if city:
+            params["city"] = city
+        if category and category != "any":
+            params["category"] = category
+        resp = requests.get(f"{BASE_URL}/explore", params=params, timeout=8)
+        # If non-2xx, show info and fall back
+        if resp.status_code < 200 or resp.status_code >= 300:
+            st.warning(f"Explore backend returned status {resp.status_code}. Using sample results.")
+            # show a short snippet for debugging (not full body)
+            snippet = resp.text[:400].replace("\n", " ")
+            st.caption(f"Backend response snippet: {snippet}")
+            return sample
+        # Parse JSON safely
         data = resp.json()
-        results = data.get("results", []) if isinstance(data, dict) else []
+        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
+            results = data["results"]
+        elif isinstance(data, list):
+            results = data
+        else:
+            st.warning("Explore backend returned unexpected JSON structure. Using sample results.")
+            st.caption(f"Response type: {type(data)}")
+            return sample
+
         normalized = []
         for r in results:
-            lat = r.get("latitude") or r.get("lat") or None
-            lon = r.get("longitude") or r.get("lon") or None
+            # Accept multiple possible field names
+            lat = r.get("latitude") or r.get("lat") or r.get("latitud") or None
+            lon = r.get("longitude") or r.get("lon") or r.get("lng") or None
             if lat is None or lon is None:
                 link = r.get("url") or r.get("link") or r.get("maps_link") or r.get("map_url") or ""
                 lat, lon = parse_map_link(link)
             if lat is not None and lon is not None:
-                r["latitude"] = float(lat)
-                r["longitude"] = float(lon)
-                normalized.append(r)
+                try:
+                    r["latitude"] = float(lat)
+                    r["longitude"] = float(lon)
+                    normalized.append(r)
+                except Exception:
+                    # skip malformed coordinates
+                    continue
+        if not normalized:
+            st.info("Explore backend returned no usable coordinates. Showing sample results.")
+            return sample
         return normalized
-    except Exception:
+
+    except requests.exceptions.Timeout:
+        st.warning("Explore fetch timed out. Using sample results.")
+        return sample
+    except requests.exceptions.ConnectionError:
+        st.warning("Explore backend unreachable (connection error). Using sample results.")
+        return sample
+    except ValueError:
+        st.warning("Explore backend returned invalid JSON. Using sample results.")
+        return sample
+    except Exception as e:
+        # Catch-all: show a short error message and fallback
         st.error("Explore fetch failed: backend unreachable or returned unexpected data.")
-        return []
+        st.caption(f"Debug: {str(e)[:300]}")
+        return sample         
 
 # -------------------------
 # UI: centered logo and login (with fallback)
