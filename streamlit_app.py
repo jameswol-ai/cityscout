@@ -9,6 +9,18 @@ import pandas as pd
 import urllib.parse
 import base64
 import math
+import requests
+import polyline  # pip install polyline
+
+def get_osrm_route(lat1, lon1, lat2, lon2):
+    """Fetch route from OSRM public API and return decoded coordinates."""
+    url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=full&geometries=polyline"
+    resp = requests.get(url).json()
+    if resp.get("routes"):
+        return polyline.decode(resp["routes"][0]["geometry"])
+    return []
+
+
 
 # -------------------------
 # Configuration
@@ -404,6 +416,35 @@ with tab2:
                     ).add_to(marker_cluster)
                 st.subheader("🗺️ Favorites Map")
                 st_folium(fav_map, width=700, height=500)
+
+# Directions: choose another favorite as destination and draw OSRM route
+if "latitude" in fav and "longitude" in fav and len(st.session_state["favorites"]) > 1:
+    other_favs = [f for f in st.session_state["favorites"] if f is not fav and "latitude" in f and "longitude" in f]
+    if other_favs:
+        dest_names = [o.get("name","Unknown") for o in other_favs]
+        dest_choice = st.selectbox(f"Get OSRM directions from {fav.get('name','Unknown')} to:", ["Select destination"] + dest_names, key=f"osrm_dir_{idx}")
+        if dest_choice and dest_choice != "Select destination":
+            chosen = other_favs[dest_names.index(dest_choice)]
+            coords = get_osrm_route(fav["latitude"], fav["longitude"], chosen["latitude"], chosen["longitude"])
+            if coords:
+                # Draw route on Folium map
+                mid_lat, mid_lon = coords[len(coords)//2]
+                route_map = folium.Map(location=[mid_lat, mid_lon], zoom_start=13)
+                folium.PolyLine(coords, color="blue", weight=5, opacity=0.7).add_to(route_map)
+                folium.Marker([fav["latitude"], fav["longitude"]], tooltip="Origin", icon=folium.Icon(color="green")).add_to(route_map)
+                folium.Marker([chosen["latitude"], chosen["longitude"]], tooltip="Destination", icon=folium.Icon(color="red")).add_to(route_map)
+
+                # Add multiple tile layers for style switching
+                folium.TileLayer('OpenStreetMap').add_to(route_map)
+                folium.TileLayer('Stamen Terrain').add_to(route_map)
+                folium.TileLayer('CartoDB positron').add_to(route_map)
+                folium.LayerControl().add_to(route_map)
+
+                st.subheader("🛣️ OSRM Route")
+                st_folium(route_map, width=700, height=400)
+            else:
+                st.info("Could not fetch route from OSRM.")
+
 
 # -------------------------
 # Footer / Notes
