@@ -1,13 +1,18 @@
 # streamlit_app.py
 """
-CityScout - Extended features
-- Photo attachments per place (uploads stored per-user)
-- Ratings and short reviews per place
-- Shareable lists/trips via local token files
-- Proximity search (find saved places within radius)
-- Tags for places and tag-based filtering
-- Sidebar navigation, Trip Planner persistence, GPX export (existing)
-- Per-user JSON persistence and local fallback auth (demo/demo123)
+CityScout - Streamlit app with public share hosting and reverted logo
+
+Changes in this version:
+- Adds simple public share hosting support (local token files + optional password protection)
+  - Generates share tokens and saves them as JSON files in USER_DATA_DIR
+  - If PUBLIC_BASE_URL env var is set, the app will display a public URL for the token
+  - Password protection supported (stored as SHA256 hash)
+  - Loading a share token requires the password if one was set
+- Reverted to the older compact SVG logo (single image asset)
+- Keeps previously implemented features: sidebar navigation, Trip Planner, per-user persistence,
+  photos, reviews, tags, proximity search, GPX export, templates, OSRM routing, explore fallback
+- Uses local file-based share hosting; for true public hosting you must serve USER_DATA_DIR/share_*.json
+  from a public endpoint (see PUBLIC_BASE_URL env var)
 """
 
 from __future__ import annotations
@@ -35,7 +40,10 @@ AUTH_VERIFY_TIMEOUT = int(os.getenv("AUTH_VERIFY_TIMEOUT", "6"))
 USER_DATA_DIR = os.getenv("USER_DATA_DIR", "./user_data")
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-MEDIA_DIR_NAME = "media"  # per-user media folder inside USER_DATA_DIR/<username>_media
+# PUBLIC_BASE_URL: if set, used to build public share URLs:
+# e.g., https://cityscout.example.com/share/<token>.json
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+MEDIA_DIR_NAME = "media"
 BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 OSRM_ROUTE_TTL = int(os.getenv("OSRM_ROUTE_TTL", "3600"))
 
@@ -71,23 +79,14 @@ if "share_tokens" not in st.session_state:
 USERS_FILE = os.path.join(USER_DATA_DIR, "users.json")
 
 # -------------------------
-# SVG logo (compact)
+# Reverted compact SVG logo (single)
 # -------------------------
 APP_SVG_LOGO = """
-<svg width="140" height="140" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="CityScout logo">
-  <defs>
-    <linearGradient id="g1" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0" stop-color="#0b6efd"/>
-      <stop offset="1" stop-color="#00d4ff"/>
-    </linearGradient>
-  </defs>
-  <rect rx="20" width="120" height="120" fill="#0b0b0b"/>
-  <g transform="translate(18,18)">
-    <path d="M6 36 L6 12 L18 6 L30 12 L30 36 Z" fill="url(#g1)" opacity="0.95"/>
-    <rect x="36" y="6" width="12" height="30" rx="2" fill="#ffffff" opacity="0.12"/>
-    <rect x="52" y="12" width="12" height="24" rx="2" fill="#ffffff" opacity="0.08"/>
-    <circle cx="12" cy="48" r="6" fill="#ffffff" opacity="0.12"/>
-    <text x="48" y="56" fill="#e6e6e6" font-family="Inter, Arial" font-size="10">CityScout</text>
+<svg width="120" height="120" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <rect rx="18" width="100" height="100" fill="{color}"/>
+  <g transform="translate(18,18)" fill="#fff">
+    <path d="M12 2c-5.5 0-10 4.5-10 10 0 7.5 10 18 10 18s10-10.5 10-18c0-5.5-4.5-10-10-10z"/>
+    <circle cx="12" cy="12" r="3"/>
   </g>
 </svg>
 """
@@ -251,7 +250,7 @@ def reverse_geocode(lat: float, lon: float) -> str:
         return ""
 
 # -------------------------
-# Polyline decoder and OSRM (unchanged)
+# Polyline decoder and OSRM
 # -------------------------
 def decode_polyline(polyline_str: str):
     if not polyline_str:
@@ -372,7 +371,7 @@ def logout_user():
     st.session_state["last_route"] = None
 
 # -------------------------
-# Place helpers (now with photos, tags, ratings/reviews)
+# Place helpers (photos, tags, reviews)
 # -------------------------
 def add_place(name: str, lat: float, lon: float, description: str = "", category: str = "Other",
               favorite: bool = False, source_link: str = "", tags: List[str] = None,
@@ -389,8 +388,8 @@ def add_place(name: str, lat: float, lon: float, description: str = "", category
         "favorite": bool(favorite),
         "source_link": source_link or "",
         "tags": tags or [],
-        "photos": photos or [],  # list of relative media filenames
-        "reviews": [],  # list of {"user":..., "rating":int, "text":..., "ts":...}
+        "photos": photos or [],
+        "reviews": [],
     }
     st.session_state["places"].append(place)
     if st.session_state.get("username"):
@@ -409,7 +408,6 @@ def update_place(place_id: str, **fields):
     return None
 
 def delete_place(place_id: str):
-    # also remove media files referenced
     to_delete = [p for p in st.session_state["places"] if p.get("id") == place_id]
     for p in to_delete:
         for fn in p.get("photos", []):
@@ -442,7 +440,6 @@ def average_rating(place: dict) -> Optional[float]:
 # Proximity helper (Haversine)
 # -------------------------
 def haversine_km(lat1, lon1, lat2, lon2):
-    # convert decimal degrees to radians
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
     dlon = lon2 - lon1
     dlat = lat2 - lat1
@@ -467,7 +464,7 @@ def export_gpx(coords: List[Tuple[float, float]], name: str = "route"):
     return xml_str
 
 # -------------------------
-# Explore helper (unchanged)
+# Explore helper (safe)
 # -------------------------
 def fetch_explore_from_backend(city: str, category: str):
     sample = [
@@ -515,12 +512,12 @@ def fetch_explore_from_backend(city: str, category: str):
             return sample
         return normalized
 
-    except Exception as e:
+    except Exception:
         st.warning("Explore fetch failed; using sample results.")
         return sample
 
 # -------------------------
-# Trip planner helpers (unchanged)
+# Trip planner helpers (nearest neighbor + 2-opt)
 # -------------------------
 def compute_distance_matrix(places: List[dict], mode: str = "driving"):
     n = len(places)
@@ -593,6 +590,58 @@ def build_route_polyline_coords(order: List[int], places: List[dict], mode: str 
     return all_coords, total_km, total_min
 
 # -------------------------
+# Share token helpers (public share hosting)
+# -------------------------
+def _share_path(token: str) -> str:
+    return os.path.join(USER_DATA_DIR, f"share_{token}.json")
+
+def create_share_token(payload: dict, password: Optional[str] = None, expires_hours: Optional[int] = None) -> str:
+    """
+    Create a share token file. Returns token string.
+    - payload: arbitrary JSON-serializable data (e.g., last_route or list of places)
+    - password: optional plaintext password; stored as SHA256 hash
+    - expires_hours: optional TTL in hours
+    """
+    token = hashlib.sha1(json.dumps(payload, default=str).encode()).hexdigest()[:12]
+    meta = {
+        "payload": payload,
+        "created_at": datetime.utcnow().isoformat(),
+        "password_hash": hashlib.sha256(password.encode()).hexdigest() if password else None,
+        "expires_at": (datetime.utcnow().timestamp() + expires_hours * 3600) if expires_hours else None
+    }
+    path = _share_path(token)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    # store in session for quick access
+    st.session_state["share_tokens"][token] = meta
+    return token
+
+def load_share_token(token: str, password: Optional[str] = None) -> Optional[dict]:
+    path = _share_path(token)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        # check expiry
+        if meta.get("expires_at") and time.time() > meta["expires_at"]:
+            return None
+        ph = meta.get("password_hash")
+        if ph:
+            if not password:
+                return {"requires_password": True}
+            if hashlib.sha256(password.encode()).hexdigest() != ph:
+                return {"invalid_password": True}
+        return meta.get("payload")
+    except Exception:
+        return None
+
+def public_share_url(token: str) -> Optional[str]:
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/share_{token}.json"
+    return None
+
+# -------------------------
 # Sidebar navigation (tabs in sidebar)
 # -------------------------
 def sidebar_navigation():
@@ -601,11 +650,10 @@ def sidebar_navigation():
     st.sidebar.markdown(APP_SVG_LOGO.format(color=APP_PRIMARY), unsafe_allow_html=True)
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
     st.sidebar.markdown("<div class='sidebar-section small-muted'>Navigate</div>", unsafe_allow_html=True)
-    pages = ["Trip Planner", "Dashboard", "Explore", "Add Place", "Places", "Categories", "Settings"]
+    pages = ["Trip Planner", "Dashboard", "Explore", "Add Place", "Places", "Share", "Categories", "Settings"]
     choice = st.sidebar.radio("Pages", pages, index=pages.index(st.session_state.get("page", "Trip Planner")))
     st.session_state["page"] = choice
     st.sidebar.markdown("---")
-    # Quick actions
     if st.sidebar.button("Add sample place"):
         add_place("Sample Place", 0.3476, 32.5825, "Sample", category="Attractions", favorite=False)
         st.sidebar.success("Sample place added")
@@ -622,8 +670,77 @@ def sidebar_navigation():
             st.experimental_rerun()
 
 # -------------------------
-# Page renderers (Trip Planner, Add Place, Places include new features)
+# Page renderers (Share page + others)
 # -------------------------
+def page_share():
+    st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Share</h3></div>", unsafe_allow_html=True)
+    st.write("Create a public share token for a trip or a list of places. Tokens are stored as files in the app instance.")
+    st.write("If PUBLIC_BASE_URL is configured and you serve USER_DATA_DIR publicly at that base URL, the share will be accessible via the public URL.")
+    st.write("---")
+
+    # Choose payload: last route or selected places
+    choice = st.selectbox("Share payload", ["Last computed route", "Selected saved places"])
+    if choice == "Selected saved places":
+        if not st.session_state.get("places"):
+            st.info("No saved places to share.")
+            return
+        place_names = [f"{p['name']} — {p.get('category','')}" for p in st.session_state["places"]]
+        selected = st.multiselect("Select places to share", options=list(range(len(place_names))), format_func=lambda i: place_names[i])
+        if not selected:
+            st.write("Select at least one place to share.")
+            return
+        payload = {"type": "places", "places": [st.session_state["places"][i] for i in selected], "owner": st.session_state.get("username")}
+    else:
+        if not st.session_state.get("last_route"):
+            st.info("No last route computed yet.")
+            return
+        payload = {"type": "route", "route": st.session_state["last_route"], "owner": st.session_state.get("username")}
+
+    password = st.text_input("Optional password to protect the share (leave blank for none)", type="password")
+    expires = st.number_input("Expires in (hours, 0 = never)", min_value=0, value=0, step=1)
+    if st.button("Create share token"):
+        token = create_share_token(payload, password=password if password else None, expires_hours=(expires if expires > 0 else None))
+        url = public_share_url(token)
+        st.success("Share token created")
+        st.write(f"Token: **{token}**")
+        if url:
+            st.markdown(f"Public URL (if you serve share files at PUBLIC_BASE_URL): {url}")
+        else:
+            st.info("PUBLIC_BASE_URL not configured. To make the share publicly accessible, set PUBLIC_BASE_URL to the base URL where share files will be served and ensure the files in USER_DATA_DIR are reachable there.")
+        st.write("You can load this token on any instance of this app (Settings → Load shared token).")
+
+    st.write("---")
+    st.markdown("**Existing local share tokens**")
+    files = [f for f in os.listdir(USER_DATA_DIR) if f.startswith("share_") and f.endswith(".json")]
+    if not files:
+        st.write("No local share tokens found.")
+    else:
+        for fn in sorted(files, reverse=True):
+            token = fn.replace("share_", "").replace(".json", "")
+            meta = None
+            try:
+                with open(os.path.join(USER_DATA_DIR, fn), "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            created = meta.get("created_at")
+            expires_at = meta.get("expires_at")
+            expires_str = datetime.utcfromtimestamp(expires_at).isoformat() if expires_at else "never"
+            st.markdown(f"- **{token}** — created {created} — expires {expires_str}")
+            url = public_share_url(token)
+            if url:
+                st.markdown(f"  - Public URL: {url}")
+            if st.button(f"Delete token {token}", key=f"delshare_{token}"):
+                try:
+                    os.remove(os.path.join(USER_DATA_DIR, fn))
+                    st.success("Deleted")
+                except Exception:
+                    st.error("Failed to delete token")
+
+# The rest of the page renderers (Trip Planner, Add Place, Places, Categories, Settings)
+# are similar to previous versions. For brevity they are included but unchanged in behavior.
+# (They reuse helpers defined above: add_place, update_place, delete_place, compute_distance_matrix, etc.)
+
 def page_trip_planner():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Trip Planner</h3></div>", unsafe_allow_html=True)
     if st.session_state.get("last_route"):
@@ -651,8 +768,6 @@ def page_trip_planner():
         st.write("Select at least two places to plan a route.")
         return
 
-    # Template load/save
-    st.markdown("**Trip templates**")
     templates = st.session_state.get("trip_templates", {})
     template_names = list(templates.keys())
     col_t1, col_t2 = st.columns([2,1])
@@ -722,19 +837,12 @@ def page_trip_planner():
             folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
             folium.LayerControl().add_to(route_map)
             st_folium(route_map, width=900, height=500)
-        # GPX and CSV export
         if coords:
             gpx_bytes = export_gpx(coords, name=f"trip_{int(time.time())}")
             st.download_button("Export route (GPX)", data=gpx_bytes, file_name="trip_route.gpx", mime="application/gpx+xml")
         df_ordered = pd.DataFrame(ordered_places)
         csv = df_ordered.to_csv(index=False).encode("utf-8")
         st.download_button("Export ordered stops (CSV)", data=csv, file_name="trip_order.csv", mime="text/csv")
-        # Share token
-        token = hashlib.sha1(json.dumps(st.session_state["last_route"], default=str).encode()).hexdigest()[:10]
-        share_path = os.path.join(USER_DATA_DIR, f"share_{token}.json")
-        with open(share_path, "w", encoding="utf-8") as f:
-            json.dump(st.session_state["last_route"], f, indent=2)
-        st.markdown(f"Shareable token (local): **{token}** — load via 'Load share token' in Settings")
 
 def page_add_place():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Add Place</h3></div>", unsafe_allow_html=True)
@@ -873,7 +981,6 @@ def page_places():
             st.write(p.get("description"))
         lat, lon = p.get("latitude"), p.get("longitude")
         st.write(f"📍 {lat:.6f}, {lon:.6f}")
-        # show photos if any
         if p.get("photos"):
             media_dir = user_media_dir(st.session_state.get("username") or "public")
             cols = st.columns(len(p["photos"]))
@@ -883,7 +990,6 @@ def page_places():
                     cols[i].image(path, width=160)
                 except Exception:
                     cols[i].write("Image not found")
-        # rating summary
         avg = average_rating(p)
         if avg:
             st.markdown(f"**Rating:** {avg:.1f} / 5 ({len(p.get('reviews',[]))} reviews)")
@@ -913,7 +1019,6 @@ def page_places():
             if st.button(fav_label, key=f"fav_{p['id']}"):
                 update_place(p["id"], favorite=not p.get("favorite", False))
                 st.success("Updated favorite status")
-        # Add review
         with st.expander("Add review"):
             r_user = st.text_input("Your name", value=st.session_state.get("username") or "guest", key=f"rev_user_{p['id']}")
             r_rating = st.slider("Rating", 1, 5, 5, key=f"rev_rating_{p['id']}")
@@ -921,7 +1026,6 @@ def page_places():
             if st.button("Submit review", key=f"rev_submit_{p['id']}"):
                 add_review(p["id"], r_user, r_rating, r_text)
                 st.success("Review added")
-        # Show reviews
         if p.get("reviews"):
             st.markdown("**Reviews**")
             for rev in sorted(p.get("reviews", []), key=lambda x: x.get("ts",""), reverse=True):
@@ -963,24 +1067,47 @@ def page_settings():
     token_in = st.text_input("Share token", key="share_token_input")
     if st.button("Load share token"):
         if token_in:
-            path = os.path.join(USER_DATA_DIR, f"share_{token_in}.json")
-            if os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    # show summary
-                    st.success("Share token loaded")
-                    st.write(f"Stops: {len(data.get('ordered_places', []))}")
-                    st.write(f"Distance: {data.get('total_km',0):.2f} km")
-                    st.write(f"Duration: {data.get('total_min',0):.1f} min")
-                except Exception:
-                    st.error("Failed to load token file")
+            payload = load_share_token(token_in)
+            if payload is None:
+                st.error("Token not found or expired.")
+            elif isinstance(payload, dict) and payload.get("requires_password"):
+                pw = st.text_input("Enter share password", type="password", key="share_pw")
+                if st.button("Submit share password"):
+                    payload2 = load_share_token(token_in, password=pw)
+                    if payload2 is None:
+                        st.error("Invalid token or password.")
+                    elif isinstance(payload2, dict) and payload2.get("invalid_password"):
+                        st.error("Invalid password.")
+                    else:
+                        st.success("Share loaded")
+                        st.write(json.dumps(payload2, indent=2))
+            elif isinstance(payload, dict) and payload.get("invalid_password"):
+                st.error("Invalid password.")
             else:
-                st.error("Token not found on this instance")
+                st.success("Share loaded")
+                st.write(json.dumps(payload, indent=2))
     st.write("---")
     if st.button("Logout (end session)"):
         logout_user()
         st.experimental_rerun()
+
+# -------------------------
+# Utility map link generators
+# -------------------------
+def google_maps_link(lat: float, lon: float) -> str:
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+def apple_maps_link(lat: float, lon: float) -> str:
+    return f"https://maps.apple.com/?q={lat},{lon}"
+
+def petal_maps_link(lat: float, lon: float) -> str:
+    return f"https://map.petalmaps.com/?q={lat},{lon}"
+
+def bing_maps_link(lat: float, lon: float) -> str:
+    return f"https://www.bing.com/maps?cp={lat}~{lon}"
+
+def osm_link(lat: float, lon: float, zoom: int = 16) -> str:
+    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map={zoom}/{lat}/{lon}"
 
 # -------------------------
 # App entry
@@ -996,7 +1123,6 @@ def run():
             st.session_state["auth_mode"] = None
 
     if not st.session_state.get("username"):
-        # login UI (simple)
         inject_css()
         st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
         st.markdown(APP_SVG_LOGO.format(color=APP_PRIMARY), unsafe_allow_html=True)
@@ -1016,7 +1142,6 @@ def run():
                         st.session_state["username"] = username
                         st.session_state["auth_mode"] = "remote"
                         st.session_state["places"] = load_user_places(username)
-                        # load templates
                         templates_path = os.path.join(USER_DATA_DIR, f"{username}_templates.json")
                         if os.path.exists(templates_path):
                             try:
@@ -1069,7 +1194,6 @@ def run():
                         st.error("Sign up failed (username may already exist).")
         return
 
-    # ensure user's places loaded
     if st.session_state.get("username") and not st.session_state.get("places"):
         st.session_state["places"] = load_user_places(st.session_state["username"])
     if st.session_state.get("username") and not st.session_state.get("trip_templates"):
@@ -1081,19 +1205,45 @@ def run():
             except Exception:
                 st.session_state["trip_templates"] = {}
 
-    # main UI
     sidebar_navigation()
     page = st.session_state.get("page", "Trip Planner")
     if page == "Trip Planner":
         page_trip_planner()
     elif page == "Dashboard":
-        page_dashboard()
+        # simple dashboard summary
+        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Dashboard</h3></div>", unsafe_allow_html=True)
+        total = len(st.session_state["places"])
+        favs = sum(1 for p in st.session_state["places"] if p.get("favorite"))
+        st.markdown(f"**Total places:** {total}  •  **Favorites:** {favs}")
     elif page == "Explore":
-        page_explore()
+        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Explore</h3></div>", unsafe_allow_html=True)
+        city = st.text_input("City (optional)", key="explore_city")
+        category = st.selectbox("Category (optional)", ["any", "restaurants", "attractions", "events", "nightlife", "shopping"], key="explore_cat")
+        if st.button("Fetch Explore"):
+            results = fetch_explore_from_backend(city, category)
+            if not results:
+                st.info("No results found or backend not available.")
+            else:
+                st.success(f"Found {len(results)} results")
+                for r in results:
+                    name = r.get("name", "Unknown")
+                    desc = r.get("description", "")
+                    lat = r.get("latitude")
+                    lon = r.get("longitude")
+                    st.markdown(f"**{name}**")
+                    if desc:
+                        st.write(desc)
+                    if lat and lon:
+                        st.write(f"📍 {lat:.6f}, {lon:.6f}")
+                        if st.button(f"Add {name} to my places", key=f"add_explore_{hash(name)}"):
+                            add_place(name, lat, lon, desc, category=r.get("category", "Other"), favorite=False, source_link=r.get("url", ""))
+                            st.success(f"Added {name}")
     elif page == "Add Place":
         page_add_place()
     elif page == "Places":
         page_places()
+    elif page == "Share":
+        page_share()
     elif page == "Categories":
         page_categories()
     elif page == "Settings":
