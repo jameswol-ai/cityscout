@@ -1,12 +1,13 @@
 # streamlit_app.py
 """
-CityScout - Fixed version
-- Background forced to black
-- Removed appearance controls (no color/font editing)
-- Login page respects black background
-- Map-link only input + interactive map click
-- Folium tile layers include attribution (fixes ValueError)
-- Removed st.experimental_rerun calls that caused recursion issues
+CityScout — Enhanced
+- Resolves short map links (maps.app.goo.gl etc.)
+- Parses Google, OSM, PetalMaps, Apple Maps, Bing Maps links
+- Categories for places; favorites-only view
+- External links for OSM, Google, PetalMaps, Apple Maps, Bing
+- Edit / Delete places
+- Black background, fixed font, no appearance controls
+- Interactive Folium maps (st_folium)
 - OSRM routing with in-memory caching
 """
 
@@ -15,6 +16,7 @@ import re
 import json
 import time
 import hashlib
+import urllib.parse
 import streamlit as st
 import requests
 import folium
@@ -29,7 +31,6 @@ BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 USERS_FILE = os.getenv("USERS_FILE", "users.json")
 OSRM_ROUTE_TTL = 3600  # seconds
 
-# Force black background and simple font
 APP_BG = "#000000"
 APP_PRIMARY = "#0b6efd"
 APP_FONT = "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial"
@@ -45,12 +46,14 @@ if "username" not in st.session_state:
     st.session_state["username"] = None
 if "favorites" not in st.session_state:
     st.session_state["favorites"] = []
-# Keep dark mode always on
+if "categories" not in st.session_state:
+    # default categories
+    st.session_state["categories"] = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "Transit", "Other"]
 if "dark_mode" not in st.session_state:
     st.session_state["dark_mode"] = True
 
 # -------------------------
-# Simple user store (file-backed)
+# Utilities: users
 # -------------------------
 def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
@@ -94,7 +97,7 @@ class InMemoryCache:
 mem_cache = InMemoryCache()
 
 # -------------------------
-# Polyline decoder (self-contained)
+# Polyline decoder
 # -------------------------
 def decode_polyline(polyline_str):
     if not polyline_str:
@@ -159,21 +162,47 @@ def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
     return [], None, None
 
 # -------------------------
-# Map link parsing (Google, OSM, PetalMaps, generic)
+# Resolve short URLs (follow redirects)
+# -------------------------
+def resolve_short_url(url: str, timeout=8):
+    try:
+        # Use HEAD first to follow redirects without downloading body
+        resp = requests.head(url, allow_redirects=True, timeout=timeout)
+        final = resp.url
+        # If HEAD returned same or no location, try GET (some shorteners require GET)
+        if not final or final == url:
+            resp = requests.get(url, allow_redirects=True, timeout=timeout)
+            final = resp.url
+        return final
+    except Exception:
+        # fallback: return original
+        return url
+
+# -------------------------
+# Map link parsing (Google, OSM, PetalMaps, Apple, Bing)
 # -------------------------
 def parse_map_link(url: str):
+    """
+    Resolve short links and extract (lat, lon) from common map link formats.
+    Returns (lat, lon) or (None, None).
+    """
     if not url or not isinstance(url, str):
         return None, None
-    s = url.strip()
-    # Google Maps @lat,lon pattern
+    url = url.strip()
+    # Resolve short links (maps.app.goo.gl, goo.gl, bit.ly, etc.)
+    resolved = resolve_short_url(url)
+    s = resolved
+
+    # Patterns
+    # Google Maps @lat,lon
     m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
-    # Google Maps q=lat,lon
-    m = re.search(r'[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    # Google Maps q=lat,lon or query=lat,lon
+    m = re.search(r'[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
-    # OpenStreetMap mlat/mlon
+    # OSM mlat/mlon
     m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
@@ -181,8 +210,19 @@ def parse_map_link(url: str):
     m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
-    # Petal Maps /place/lat,lon or @lat,lon
+    # PetalMaps /place/lat,lon or @lat,lon
     m = re.search(r'/place/(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # Apple Maps q=lat,lon or ll=lat,lon
+    m = re.search(r'[?&](?:q|ll)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # Bing maps cp=lat~lon
+    m = re.search(r'[?&]cp=(-?\d+\.\d+)~(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
     # Generic fallback: first two floats separated by comma
@@ -192,7 +232,27 @@ def parse_map_link(url: str):
     return None, None
 
 # -------------------------
-# SVG logo (single, colorized)
+# External map link generators
+# -------------------------
+def google_maps_link(lat, lon):
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+def osm_link(lat, lon, zoom=16):
+    # OpenStreetMap link with mlat/mlon and #map
+    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map={zoom}/{lat}/{lon}"
+
+def petal_maps_link(lat, lon):
+    # Petal Maps often supports query param q=lat,lon or /place/lat,lon
+    return f"https://map.petalmaps.com/?q={lat},{lon}"
+
+def apple_maps_link(lat, lon):
+    return f"https://maps.apple.com/?q={lat},{lon}"
+
+def bing_maps_link(lat, lon):
+    return f"https://www.bing.com/maps?cp={lat}~{lon}"
+
+# -------------------------
+# SVG logo
 # -------------------------
 APP_SVG_LOGO = """
 <svg width="160" height="160" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -205,7 +265,7 @@ APP_SVG_LOGO = """
 """
 
 # -------------------------
-# Minimal CSS injection (black background, fixed font)
+# Minimal CSS (black background)
 # -------------------------
 def inject_css():
     css = f"""
@@ -233,12 +293,13 @@ def inject_css():
       cursor: pointer;
       box-shadow: 0 8px 24px rgba(11,110,253,0.12);
     }}
+    a.map-link {{ color: #9ad0ff; text-decoration: underline; }}
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
 
 # -------------------------
-# Authentication UI (logo-only page)
+# Authentication UI (logo-only)
 # -------------------------
 def show_logo_only_login():
     inject_css()
@@ -256,7 +317,6 @@ def show_logo_only_login():
             if username in users and users[username]["password_hash"] == _hash_password(password):
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
-                # do not call experimental_rerun here; let Streamlit re-render naturally
             else:
                 st.error("Invalid username or password")
     with col2:
@@ -273,6 +333,33 @@ def show_logo_only_login():
                     st.success("Account created. Log in now.")
 
 # -------------------------
+# Place helpers: add/edit/delete
+# -------------------------
+def add_place(name, lat, lon, description="", category="Other", favorite=False, source_link=None):
+    place = {
+        "id": hashlib.sha1(f"{name}{lat}{lon}{time.time()}".encode()).hexdigest()[:12],
+        "name": name,
+        "latitude": float(lat),
+        "longitude": float(lon),
+        "description": description or "",
+        "category": category or "Other",
+        "favorite": bool(favorite),
+        "source_link": source_link or ""
+    }
+    st.session_state["favorites"].append(place)
+    return place
+
+def update_place(place_id, **fields):
+    for p in st.session_state["favorites"]:
+        if p.get("id") == place_id:
+            p.update(fields)
+            return p
+    return None
+
+def delete_place(place_id):
+    st.session_state["favorites"] = [p for p in st.session_state["favorites"] if p.get("id") != place_id]
+
+# -------------------------
 # Top bar and main app
 # -------------------------
 def top_bar():
@@ -284,15 +371,22 @@ def top_bar():
         st.markdown(f"<h3 style='margin:0;color:#e6e6e6'>CityScout</h3>", unsafe_allow_html=True)
     with cols[2]:
         if st.session_state["logged_in"]:
-            # set state and avoid experimental_rerun to prevent recursion issues
             if st.button("Logout", key="btn_logout"):
                 st.session_state["logged_in"] = False
                 st.session_state["username"] = None
-                st.experimental_rerun()  # allowed; kept but safe because we don't call it elsewhere immediately
+                # safe rerun
+                st.experimental_rerun()
 
 def main_app():
     inject_css()
     top_bar()
+
+    # Sidebar: categories and favorites-only toggle
+    st.sidebar.header("Filters")
+    cat_options = ["All"] + st.session_state["categories"]
+    selected_cat = st.sidebar.selectbox("Category", cat_options, index=0)
+    favorites_only = st.sidebar.checkbox("Favorites only", value=False)
+    show_fullscreen_favs = st.sidebar.button("Open Favorites Map (full)")
 
     tab1, tab2, tab3 = st.tabs(["🔍 Explore", "➕ Add Place (link or map click)", "⭐ Favorites"])
 
@@ -317,21 +411,21 @@ def main_app():
                     st.markdown(f"**{item.get('name','Unknown')}**")
                     st.write(item.get("description", ""))
                     if st.button("Add to Favorites", key=f"explore_add_{hash(item.get('name',''))}"):
-                        item.setdefault("tag", "None")
+                        item.setdefault("category", "Other")
+                        item.setdefault("favorite", True)
                         st.session_state["favorites"].append(item)
                         st.success("Added to favorites")
 
-    # Add Place tab (map link only + map click)
+    # Add Place tab
     with tab2:
         st.markdown("<div class='card'><h4 style='margin:0;color:#e6e6e6'>Add a Place</h4></div>", unsafe_allow_html=True)
-        st.write("Provide a **map link** (Google Maps, OpenStreetMap, PetalMaps, etc.) or click on the interactive map below to pick a location.")
+        st.write("Provide a **map link** (Google Maps, OpenStreetMap, PetalMaps, Apple Maps, Bing Maps) or click on the interactive map below to pick a location.")
         with st.form("add_place_form"):
             name = st.text_input("Place name", "")
             map_link = st.text_input("Map link (paste here)", "")
             description = st.text_area("Short description (optional)", "")
-            tag = st.selectbox("Tag", ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"])
-            if tag == "Custom":
-                tag = st.text_input("Custom tag name", key="custom_tag_input")
+            category = st.selectbox("Category", st.session_state["categories"] + ["Other"])
+            favorite_flag = st.checkbox("Mark as favorite", value=False)
             submitted = st.form_submit_button("Add place from link")
             if submitted:
                 lat_f, lon_f = None, None
@@ -340,15 +434,14 @@ def main_app():
                 if lat_f is None or lon_f is None:
                     st.error("Could not extract coordinates from the link. Try a different link or click on the map below.")
                 else:
-                    place = {
-                        "name": name or f"Place {len(st.session_state['favorites'])+1}",
-                        "latitude": float(lat_f),
-                        "longitude": float(lon_f),
-                        "description": description,
-                        "tag": tag or "None"
-                    }
-                    st.session_state["favorites"].append(place)
+                    place = add_place(name or f"Place {len(st.session_state['favorites'])+1}", lat_f, lon_f, description, category, favorite_flag, source_link=map_link)
                     st.success("Place added to favorites")
+                    st.write("External links:")
+                    st.markdown(f"- [OpenStreetMap]({osm_link(lat_f, lon_f)})")
+                    st.markdown(f"- [Google Maps]({google_maps_link(lat_f, lon_f)})")
+                    st.markdown(f"- [PetalMaps]({petal_maps_link(lat_f, lon_f)})")
+                    st.markdown(f"- [Apple Maps]({apple_maps_link(lat_f, lon_f)})")
+                    st.markdown(f"- [Bing Maps]({bing_maps_link(lat_f, lon_f)})")
 
         st.markdown("**Interactive map** — click to pick coordinates (last click shown below).")
         if st.session_state["favorites"]:
@@ -357,7 +450,6 @@ def main_app():
         else:
             center_lat, center_lon = 0.3476, 32.5825  # Kampala default
 
-        # Build map and add tile layers with attribution
         m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
         folium.TileLayer('OpenStreetMap', attr='© OpenStreetMap contributors').add_to(m)
         folium.TileLayer('Stamen Terrain', attr='Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap contributors').add_to(m)
@@ -378,134 +470,92 @@ def main_app():
             with st.form("add_from_click_form"):
                 place_name = st.text_input("Name for clicked place", value=f"Place {len(st.session_state['favorites'])+1}", key="name_click")
                 place_desc = st.text_area("Description (optional)", key="desc_click")
-                place_tag = st.selectbox("Tag", ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"], key="tag_click")
-                if place_tag == "Custom":
-                    place_tag = st.text_input("Custom tag", key="tag_click_custom")
+                place_cat = st.selectbox("Category", st.session_state["categories"] + ["Other"], key="cat_click")
+                fav_flag = st.checkbox("Mark as favorite", value=False, key="fav_click")
                 add_clicked = st.form_submit_button("Add place at clicked location")
                 if add_clicked:
-                    place = {
-                        "name": place_name or f"Place {len(st.session_state['favorites'])+1}",
-                        "latitude": float(last_click["lat"]),
-                        "longitude": float(last_click["lng"]),
-                        "description": place_desc,
-                        "tag": place_tag or "None"
-                    }
-                    st.session_state["favorites"].append(place)
+                    place = add_place(place_name or f"Place {len(st.session_state['favorites'])+1}", last_click["lat"], last_click["lng"], place_desc, place_cat, fav_flag, source_link="")
                     st.success("Place added from map click")
+                    st.markdown(f"- [OpenStreetMap]({osm_link(place['latitude'], place['longitude'])})")
+                    st.markdown(f"- [Google Maps]({google_maps_link(place['latitude'], place['longitude'])})")
+                    st.markdown(f"- [PetalMaps]({petal_maps_link(place['latitude'], place['longitude'])})")
+                    st.markdown(f"- [Apple Maps]({apple_maps_link(place['latitude'], place['longitude'])})")
+                    st.markdown(f"- [Bing Maps]({bing_maps_link(place['latitude'], place['longitude'])})")
 
     # Favorites tab
     with tab3:
         st.markdown("<div class='card'><h4 style='margin:0;color:#e6e6e6'>Your Favorites</h4></div>", unsafe_allow_html=True)
-        if not st.session_state["favorites"]:
-            st.info("No favorites yet. Add places from Add Place.")
+        # Build filtered list
+        items = st.session_state["favorites"]
+        if selected_cat != "All":
+            items = [p for p in items if p.get("category") == selected_cat]
+        if favorites_only:
+            items = [p for p in items if p.get("favorite")]
+
+        if not items:
+            st.info("No places match the current filters.")
         else:
-            search_query = st.text_input("Search favorites by name", key="fav_search")
-            tags = sorted({fav.get("tag", "None") for fav in st.session_state["favorites"]})
-            tag_options = ["All"] + [t for t in tags if t]
-            tag_filter = st.selectbox("Filter by tag", tag_options, index=0, key="fav_tag_filter")
-
-            favorites_to_show = st.session_state["favorites"]
-            if search_query:
-                favorites_to_show = [f for f in favorites_to_show if search_query.lower() in f.get("name","").lower()]
-            if tag_filter != "All":
-                favorites_to_show = [f for f in favorites_to_show if f.get("tag","None") == tag_filter]
-
-            for idx, fav in enumerate(favorites_to_show):
-                st.markdown(f"**{fav.get('name','Unknown')}**")
-                if fav.get("description"):
-                    st.write(fav.get("description"))
-                if "latitude" in fav and "longitude" in fav:
-                    st.write(f"📍 {fav['latitude']:.6f}, {fav['longitude']:.6f}")
-                # Tagging
-                current_tag = fav.get("tag", "None")
-                tag_choices = ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"]
-                if current_tag not in tag_choices:
-                    tag_choices.append(current_tag)
-                new_tag = st.selectbox(f"Tag for {fav.get('name','')}", tag_choices, index=tag_choices.index(current_tag), key=f"tag_{idx}")
-                if new_tag == "Custom":
-                    custom_tag = st.text_input(f"Custom tag for {fav.get('name','')}", key=f"custom_tag_{idx}")
-                    if custom_tag:
-                        fav["tag"] = custom_tag
-                else:
-                    fav["tag"] = new_tag
-
-                # OSRM directions (choose destination)
-                if "latitude" in fav and "longitude" in fav and len(st.session_state["favorites"]) > 1:
-                    other_favs = [f for f in st.session_state["favorites"] if f is not fav and "latitude" in f and "longitude" in f]
-                    if other_favs:
-                        dest_names = [o.get("name","Unknown") for o in other_favs]
-                        dest_choice = st.selectbox(f"Get directions from {fav.get('name','')}", ["Select destination"] + dest_names, key=f"osrm_dest_{idx}")
-                        if dest_choice and dest_choice != "Select destination":
-                            chosen = other_favs[dest_names.index(dest_choice)]
-                            mode = st.radio("Mode", ["driving", "walking", "cycling"], key=f"osrm_mode_{idx}")
-                            coords, distance_km, duration_min = get_osrm_route(
-                                fav["latitude"], fav["longitude"], chosen["latitude"], chosen["longitude"], mode=mode
-                            )
-                            if coords:
-                                mid_lat, mid_lon = coords[len(coords)//2]
-                                route_map = folium.Map(location=[mid_lat, mid_lon], zoom_start=13)
-                                folium.PolyLine(coords, color=APP_PRIMARY, weight=5, opacity=0.8).add_to(route_map)
-                                folium.Marker([fav["latitude"], fav["longitude"]], tooltip="Origin", icon=folium.Icon(color="green")).add_to(route_map)
-                                folium.Marker([chosen["latitude"], chosen["longitude"]], tooltip="Destination", icon=folium.Icon(color="red")).add_to(route_map)
-                                folium.TileLayer('OpenStreetMap', attr='© OpenStreetMap contributors').add_to(route_map)
-                                folium.TileLayer('Stamen Terrain', attr='Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap contributors').add_to(route_map)
-                                folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
-                                folium.TileLayer(
-                                    tiles='https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-                                    name='Dark',
-                                    attr='© CartoDB',
-                                    overlay=False,
-                                    control=True
-                                ).add_to(route_map)
-                                folium.LayerControl().add_to(route_map)
-                                st.write(f"**Mode:** {mode.capitalize()}")
-                                if distance_km is not None:
-                                    st.write(f"📏 Distance: {distance_km:.2f} km")
-                                if duration_min is not None:
-                                    if duration_min >= 60:
-                                        hours = int(duration_min // 60)
-                                        mins = int(duration_min % 60)
-                                        st.write(f"⏱️ Estimated time: {hours}h {mins}m")
-                                    else:
-                                        st.write(f"⏱️ Estimated time: {duration_min:.1f} minutes")
-                                st_folium(route_map, width=700, height=400)
-                            else:
-                                st.info("Could not fetch route from OSRM.")
-
+            # List with edit/delete and external links
+            for p in items:
+                st.markdown(f"**{p.get('name','Unknown')}**  —  *{p.get('category','None')}*")
+                if p.get("description"):
+                    st.write(p.get("description"))
+                lat, lon = p.get("latitude"), p.get("longitude")
+                if lat is not None and lon is not None:
+                    st.write(f"📍 {lat:.6f}, {lon:.6f}")
+                    # external links
+                    st.markdown(f"[OpenStreetMap]({osm_link(lat, lon)})  |  [Google]({google_maps_link(lat, lon)})  |  [PetalMaps]({petal_maps_link(lat, lon)})  |  [Apple]({apple_maps_link(lat, lon)})  |  [Bing]({bing_maps_link(lat, lon)})", unsafe_allow_html=True)
+                # Edit / Delete / Favorite toggle
+                col_a, col_b, col_c = st.columns([1,1,1])
+                with col_a:
+                    if st.button("Edit", key=f"edit_{p['id']}"):
+                        # show edit form in modal-like area
+                        with st.form(f"edit_form_{p['id']}"):
+                            new_name = st.text_input("Name", value=p.get("name",""))
+                            new_desc = st.text_area("Description", value=p.get("description",""))
+                            new_cat = st.selectbox("Category", st.session_state["categories"] + ["Other"], index=(st.session_state["categories"] + ["Other"]).index(p.get("category","Other")))
+                            new_fav = st.checkbox("Favorite", value=bool(p.get("favorite", False)))
+                            save = st.form_submit_button("Save changes")
+                            if save:
+                                update_place(p["id"], name=new_name, description=new_desc, category=new_cat, favorite=new_fav)
+                                st.success("Saved")
+                with col_b:
+                    if st.button("Delete", key=f"del_{p['id']}"):
+                        delete_place(p["id"])
+                        st.success("Deleted")
+                with col_c:
+                    fav_label = "Unfavorite" if p.get("favorite") else "Mark Favorite"
+                    if st.button(fav_label, key=f"fav_{p['id']}"):
+                        update_place(p["id"], favorite=not p.get("favorite", False))
+                        st.success("Updated favorite status")
                 st.write("---")
 
-            # Favorites map (all)
-            coords = [f for f in st.session_state["favorites"] if "latitude" in f and "longitude" in f]
-            if coords:
-                first = coords[0]
-                fav_map = folium.Map(location=[first["latitude"], first["longitude"]], zoom_start=12)
-                marker_cluster = MarkerCluster().add_to(fav_map)
-                heat_points = []
-                for fav in coords:
-                    folium.Marker(
-                        [fav["latitude"], fav["longitude"]],
-                        popup=f"{fav.get('name','')}<br>🏷️ {fav.get('tag','None')}",
-                        tooltip=fav.get('name','')
-                    ).add_to(marker_cluster)
-                    heat_points.append([fav["latitude"], fav["longitude"]])
-                if st.checkbox("Show heatmap of favorites", value=False):
-                    HeatMap(heat_points, radius=15).add_to(fav_map)
-                folium.TileLayer('OpenStreetMap', attr='© OpenStreetMap contributors').add_to(fav_map)
-                folium.TileLayer('Stamen Terrain', attr='Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap contributors').add_to(fav_map)
-                folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(fav_map)
-                folium.TileLayer(
-                    tiles='https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-                    name='Dark',
-                    attr='© CartoDB',
-                    overlay=False,
-                    control=True
-                ).add_to(fav_map)
-                folium.LayerControl().add_to(fav_map)
-                st.subheader("Favorites Map (interactive)")
-                map_out = st_folium(fav_map, width=900, height=500)
-                last = map_out.get("last_clicked")
-                if last:
-                    st.info(f"Map clicked at: {last['lat']:.6f}, {last['lng']:.6f}")
+            # Favorites-only full map
+            if show_fullscreen_favs:
+                coords = [f for f in items if "latitude" in f and "longitude" in f]
+                if coords:
+                    first = coords[0]
+                    fav_map = folium.Map(location=[first["latitude"], first["longitude"]], zoom_start=12)
+                    marker_cluster = MarkerCluster().add_to(fav_map)
+                    for fav in coords:
+                        folium.Marker(
+                            [fav["latitude"], fav["longitude"]],
+                            popup=f"{fav.get('name','')}<br>🏷️ {fav.get('category','None')}",
+                            tooltip=fav.get('name','')
+                        ).add_to(marker_cluster)
+                    folium.TileLayer('OpenStreetMap', attr='© OpenStreetMap contributors').add_to(fav_map)
+                    folium.TileLayer('Stamen Terrain', attr='Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap contributors').add_to(fav_map)
+                    folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(fav_map)
+                    folium.TileLayer(
+                        tiles='https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+                        name='Dark',
+                        attr='© CartoDB',
+                        overlay=False,
+                        control=True
+                    ).add_to(fav_map)
+                    folium.LayerControl().add_to(fav_map)
+                    st.subheader("Favorites Map (full)")
+                    st_folium(fav_map, width=1200, height=800)
 
             # Export / Import / Clear
             df = pd.DataFrame(st.session_state["favorites"])
@@ -517,8 +567,9 @@ def main_app():
                     imported_df = pd.read_csv(uploaded)
                     imported_records = imported_df.to_dict(orient="records")
                     for rec in imported_records:
-                        rec.setdefault("tag", rec.get("tag", "None"))
-                    st.session_state["favorites"].extend(imported_records)
+                        rec.setdefault("category", rec.get("category", "Other"))
+                        rec.setdefault("favorite", rec.get("favorite", False))
+                        st.session_state["favorites"].append(rec)
                     st.success("Imported favorites")
                 except Exception as e:
                     st.error(f"Import failed: {e}")
