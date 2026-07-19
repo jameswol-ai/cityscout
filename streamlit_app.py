@@ -3,47 +3,46 @@
 CityScout - Streamlit app (OpenStreetMap + OSRM)
 Features:
 - Login / Sign up (file-backed, hashed passwords)
-- Single SVG logo on login screen
-- Add places by name + latitude + longitude
+- Add places by name + latitude/longitude OR paste a map link OR click on interactive map
 - Modern / Classic UI toggle
-- Explore tab (calls backend /explore if available)
-- Favorites tab with OSRM routing (driving/walking/cycling), distance/duration, pairwise matrix
-- Folium maps with clustering, heatmap, and route polylines
-- Lightweight caching (in-memory + optional file cache)
+- Single SVG logo on login screen
+- Animated buttons via CSS
+- Interactive Folium maps (st_folium) with clustering, heatmap, OSRM routing (driving/walking/cycling)
+- Lightweight in-memory cache for OSRM calls
 """
 
 import os
 import json
 import time
 import hashlib
+import re
 import streamlit as st
 import requests
 import folium
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 import pandas as pd
-import math
 
 # -------------------------
 # Configuration
 # -------------------------
 BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")  # optional backend for /explore
 USERS_FILE = os.getenv("USERS_FILE", "users.json")
-USE_FILE_CACHE = os.getenv("USE_FILE_CACHE", "false").lower() == "true"
-CACHE_DIR = os.getenv("CACHE_DIR", "./.cache")
-OSRM_ROUTE_TTL = int(os.getenv("OSRM_ROUTE_TTL", "3600"))  # seconds
-PAIRWISE_TTL = int(os.getenv("PAIRWISE_TTL", "3600"))  # seconds
+OSRM_ROUTE_TTL = 3600  # seconds
 
 st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
 
 # -------------------------
-# Ensure cache dir
+# Session state defaults
 # -------------------------
-if USE_FILE_CACHE and not os.path.exists(CACHE_DIR):
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-    except Exception:
-        USE_FILE_CACHE = False
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+if "username" not in st.session_state:
+    st.session_state["username"] = None
+if "favorites" not in st.session_state:
+    st.session_state["favorites"] = []
+if "ui_theme" not in st.session_state:
+    st.session_state["ui_theme"] = "modern"
 
 # -------------------------
 # Simple user store (file-backed)
@@ -68,18 +67,6 @@ def save_users(users):
         pass
 
 # -------------------------
-# Session state defaults
-# -------------------------
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-if "username" not in st.session_state:
-    st.session_state["username"] = None
-if "favorites" not in st.session_state:
-    st.session_state["favorites"] = []
-if "ui_theme" not in st.session_state:
-    st.session_state["ui_theme"] = "modern"  # or "classic"
-
-# -------------------------
 # In-memory TTL cache
 # -------------------------
 class InMemoryCache:
@@ -100,57 +87,6 @@ class InMemoryCache:
         self.store[key] = (value, self._now() + ttl)
 
 mem_cache = InMemoryCache()
-
-# -------------------------
-# File cache helpers
-# -------------------------
-def _file_cache_path(key):
-    h = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return os.path.join(CACHE_DIR, f"{h}.json")
-
-def file_cache_get(key):
-    if not USE_FILE_CACHE:
-        return None
-    path = _file_cache_path(key)
-    try:
-        if not os.path.exists(path):
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if int(time.time()) > payload.get("expires_at", 0):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-            return None
-        return payload.get("value")
-    except Exception:
-        return None
-
-def file_cache_set(key, value, ttl):
-    if not USE_FILE_CACHE:
-        return
-    path = _file_cache_path(key)
-    payload = {"value": value, "expires_at": int(time.time()) + ttl}
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-    except Exception:
-        pass
-
-def cache_get(key):
-    v = mem_cache.get(key)
-    if v is not None:
-        return v
-    v = file_cache_get(key)
-    if v is not None:
-        mem_cache.set(key, v, OSRM_ROUTE_TTL)
-        return v
-    return None
-
-def cache_set(key, value, ttl):
-    mem_cache.set(key, value, ttl)
-    file_cache_set(key, value, ttl)
 
 # -------------------------
 # Polyline decoder (self-contained)
@@ -193,7 +129,7 @@ def _osrm_cache_key(lat1, lon1, lat2, lon2, mode):
 
 def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
     key = _osrm_cache_key(lat1, lon1, lat2, lon2, mode)
-    cached = cache_get(key)
+    cached = mem_cache.get(key)
     if cached is not None:
         return cached["coords"], cached["distance_km"], cached["duration_min"]
     try:
@@ -211,59 +147,50 @@ def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
             distance_km = route.get("distance", 0) / 1000.0
             duration_min = route.get("duration", 0) / 60.0
             payload = {"coords": coords, "distance_km": distance_km, "duration_min": duration_min}
-            cache_set(key, payload, OSRM_ROUTE_TTL)
+            mem_cache.set(key, payload, OSRM_ROUTE_TTL)
             return coords, distance_km, duration_min
     except Exception:
         pass
     return [], None, None
 
 # -------------------------
-# Pairwise matrix caching
+# Map link parsing (Google Maps and OpenStreetMap)
 # -------------------------
-def _pairwise_cache_key(favorites, mode):
-    coords = []
-    for f in favorites:
-        if "latitude" in f and "longitude" in f:
-            coords.append(f"{f['latitude']:.6f},{f['longitude']:.6f}")
-        else:
-            coords.append("na")
-    key_raw = f"pairwise:{mode}:" + "|".join(coords)
-    return hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
-
-def compute_pairwise_matrix(favorites, mode="driving"):
-    cache_key = _pairwise_cache_key(favorites, mode)
-    cached = cache_get(cache_key)
-    if cached is not None:
-        return cached
-    matrix = []
-    n = len(favorites)
-    for i in range(n):
-        a = favorites[i]
-        if "latitude" not in a or "longitude" not in a:
-            continue
-        for j in range(n):
-            if i == j:
-                continue
-            b = favorites[j]
-            if "latitude" not in b or "longitude" not in b:
-                continue
-            coords, dist, dur = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode=mode)
-            matrix.append({
-                "origin_idx": i,
-                "dest_idx": j,
-                "origin_name": a.get("name", f"Fav {i}"),
-                "dest_name": b.get("name", f"Fav {j}"),
-                "distance_km": dist,
-                "duration_min": dur
-            })
-    cache_set(cache_key, matrix, PAIRWISE_TTL)
-    return matrix
+def parse_map_link(url: str):
+    """
+    Extract (lat, lon) from common Google Maps and OpenStreetMap link formats.
+    Returns (lat, lon) or (None, None) if not found.
+    """
+    if not url or not isinstance(url, str):
+        return None, None
+    url = url.strip()
+    # Google Maps @lat,lon,zoom pattern
+    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # Google Maps q=lat,lon
+    m = re.search(r'[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # OpenStreetMap mlat/mlon
+    m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', url)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # OSM #map=zoom/lat/lon
+    m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', url)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    # fallback: look for two floats separated by comma anywhere
+    m = re.search(r'(-?\d+\.\d+)[, ]+(-?\d+\.\d+)', url)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    return None, None
 
 # -------------------------
-# SVG logo (single logo used at login)
+# SVG logo (single)
 # -------------------------
 APP_SVG_LOGO = """
-<svg width="160" height="160" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+<svg width="120" height="120" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
   <rect rx="16" width="100" height="100" fill="#0b6efd"/>
   <g transform="translate(18,18)" fill="#fff">
     <path d="M12 2c-5.5 0-10 4.5-10 10 0 7.5 10 18 10 18s10-10.5 10-18c0-5.5-4.5-10-10-10z"/>
@@ -273,44 +200,41 @@ APP_SVG_LOGO = """
 """
 
 # -------------------------
-# UI theme CSS
+# CSS: modern/classic + animated buttons
 # -------------------------
 MODERN_CSS = """
 <style>
-/* Modern card style */
-.css-1d391kg {padding: 0.5rem;} /* small tweak for Streamlit container */
-.card {
-  background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
-  border-radius: 12px;
-  padding: 14px;
-  box-shadow: 0 6px 18px rgba(11,110,253,0.08);
-  margin-bottom: 12px;
-}
+.card { background: linear-gradient(180deg,#ffffff 0%,#f7fbff 100%); border-radius:12px; padding:14px; box-shadow:0 6px 18px rgba(11,110,253,0.08); margin-bottom:12px; }
 .header-row {display:flex; align-items:center; gap:12px;}
 .logo {width:64px; height:64px;}
 .small-muted {color:#6b7280; font-size:0.9rem;}
-.btn-primary {background:#0b6efd; color:white; padding:8px 12px; border-radius:8px; border:none;}
+.btn-animated {
+  background:#0b6efd; color:white; padding:10px 14px; border-radius:10px; border:none; cursor:pointer;
+  box-shadow: 0 6px 18px rgba(11,110,253,0.12);
+  transform: translateY(0);
+  animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+  0% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+  100% { transform: translateY(0); }
+}
+.small-ghost { background:transparent; border:1px solid #0b6efd; color:#0b6efd; padding:8px 12px; border-radius:8px; cursor:pointer; }
 </style>
 """
 
 CLASSIC_CSS = """
 <style>
-/* Classic minimal style */
-.card {
-  background: #fff;
-  border-radius: 6px;
-  padding: 10px;
-  border: 1px solid #e6e6e6;
-  margin-bottom: 10px;
-}
+.card { background:#fff; border-radius:6px; padding:10px; border:1px solid #e6e6e6; margin-bottom:10px; }
 .header-row {display:flex; align-items:center; gap:10px;}
 .logo {width:56px; height:56px;}
-.small-muted {color:#333; font-size:0.9rem;}
+.btn-animated { background:#0b6efd; color:white; padding:8px 12px; border-radius:6px; border:none; cursor:pointer; animation: pulse 2.5s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 rgba(11,110,253,0.2);} 70% { box-shadow: 0 0 20px rgba(11,110,253,0);} 100% { box-shadow: 0 0 0 rgba(11,110,253,0);} }
 </style>
 """
 
 # -------------------------
-# Authentication UI
+# Authentication UI (file-backed)
 # -------------------------
 def show_login_signup():
     st.markdown("<div style='display:flex;align-items:center;gap:16px'>", unsafe_allow_html=True)
@@ -318,13 +242,12 @@ def show_login_signup():
     st.markdown("<div><h2 style='margin:0'>CityScout</h2><div class='small-muted'>Open maps, routes, favorites</div></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
     st.write("---")
-
-    col1, col2 = st.columns([1, 1])
+    col1, col2 = st.columns(2)
     with col1:
         st.subheader("Login")
         username = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Login"):
+        if st.button("Login", key="btn_login"):
             users = load_users()
             if username in users and users[username]["password_hash"] == _hash_password(password):
                 st.session_state["logged_in"] = True
@@ -338,7 +261,7 @@ def show_login_signup():
         new_user = st.text_input("Choose username", key="signup_user")
         new_pass = st.text_input("Choose password", type="password", key="signup_pass")
         confirm_pass = st.text_input("Confirm password", type="password", key="signup_confirm")
-        if st.button("Sign up"):
+        if st.button("Sign up", key="btn_signup"):
             if not new_user or not new_pass:
                 st.error("Provide username and password")
             elif new_pass != confirm_pass:
@@ -353,56 +276,43 @@ def show_login_signup():
                     st.success("Account created. You can now log in.")
 
 # -------------------------
-# Top bar: theme toggle and logout
+# Top bar and main app
 # -------------------------
 def top_bar():
     cols = st.columns([1, 3, 1])
     with cols[0]:
-        # small logo
         st.markdown(APP_SVG_LOGO, unsafe_allow_html=True)
     with cols[1]:
         st.markdown("<h3 style='margin:0'>CityScout</h3>", unsafe_allow_html=True)
     with cols[2]:
         if st.session_state["logged_in"]:
-            if st.button("Logout"):
+            if st.button("Logout", key="btn_logout"):
                 st.session_state["logged_in"] = False
                 st.session_state["username"] = None
                 st.experimental_rerun()
 
-# -------------------------
-# Main app UI
-# -------------------------
 def main_app():
-    # inject CSS based on theme
+    # inject CSS
     if st.session_state["ui_theme"] == "modern":
         st.markdown(MODERN_CSS, unsafe_allow_html=True)
     else:
         st.markdown(CLASSIC_CSS, unsafe_allow_html=True)
 
     top_bar()
-
-    # Theme toggle
     theme_col1, theme_col2 = st.columns([1, 3])
     with theme_col1:
         theme_choice = st.radio("UI style", ["modern", "classic"], index=0 if st.session_state["ui_theme"] == "modern" else 1, horizontal=True, key="ui_style_radio")
         st.session_state["ui_theme"] = theme_choice
 
-    # Tabs
     tab1, tab2, tab3 = st.tabs(["🔍 Explore", "➕ Add Place", "⭐ Favorites"])
 
-    # Explore tab
+    # Explore tab (basic backend call optional)
     with tab1:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("<h4 style='margin:0'>Explore</h4>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
+        st.markdown("<div class='card'><h4 style='margin:0'>Explore</h4></div>", unsafe_allow_html=True)
         st.sidebar.header("Search Options")
-        city = st.sidebar.text_input("Enter a city name (optional)", "")
+        city = st.sidebar.text_input("City (optional)", "")
         category = st.sidebar.selectbox("Category (optional)", ["any", "restaurants", "attractions", "events", "nightlife", "shopping"])
-        min_rating = st.sidebar.slider("Minimum rating (if backend provides)", 0.0, 5.0, 0.0, 0.5)
-        show_heatmap = st.sidebar.checkbox("Show heatmap", value=False)
-
-        if st.button("Fetch Explore (backend)"):
+        if st.button("Fetch Explore (backend)", key="btn_fetch_explore"):
             try:
                 resp = requests.get(f"{BASE_URL}/explore", params={"city": city, "category": category}, timeout=10)
                 resp.raise_for_status()
@@ -413,57 +323,89 @@ def main_app():
             if not results:
                 st.info("No results from backend or backend not running.")
             else:
-                st.write(f"Found {len(results)} results")
-                # display and allow add to favorites
                 for item in results:
                     st.markdown(f"**{item.get('name','Unknown')}**")
                     st.write(item.get("description", ""))
-                    if st.button(f"Add to Favorites: {item.get('name','Unknown')}", key=f"explore_add_{item.get('name','')}_{hash(item.get('name',''))}"):
+                    if st.button("Add to Favorites", key=f"explore_add_{hash(item.get('name',''))}"):
                         item.setdefault("tag", "None")
                         st.session_state["favorites"].append(item)
                         st.success("Added to favorites")
 
     # Add Place tab
     with tab2:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("<h4 style='margin:0'>Add a Place</h4>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
+        st.markdown("<div class='card'><h4 style='margin:0'>Add a Place</h4></div>", unsafe_allow_html=True)
+        st.write("You can add a place by **name + coordinates**, **paste a map link**, or **click on the interactive map** below.")
         with st.form("add_place_form"):
             name = st.text_input("Place name", "")
-            lat = st.text_input("Latitude (decimal)", "")
-            lon = st.text_input("Longitude (decimal)", "")
+            lat = st.text_input("Latitude (decimal) — leave blank if using link or map click", "")
+            lon = st.text_input("Longitude (decimal) — leave blank if using link or map click", "")
+            map_link = st.text_input("Or paste a Google Maps / OpenStreetMap link (optional)", "")
             description = st.text_area("Short description (optional)", "")
             tag = st.selectbox("Tag", ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"])
             if tag == "Custom":
                 tag = st.text_input("Custom tag name", key="custom_tag_input")
-            submitted = st.form_submit_button("Add place")
+            submitted = st.form_submit_button("Add place", help="Add the place to your favorites")
+            # animated button style via markdown (visual only)
             if submitted:
-                try:
-                    lat_f = float(lat)
-                    lon_f = float(lon)
+                lat_f = None
+                lon_f = None
+                # try parse link first
+                if map_link:
+                    lat_f, lon_f = parse_map_link(map_link)
+                # then try direct inputs
+                if (lat and lon) and (lat_f is None or lon_f is None):
+                    try:
+                        lat_f = float(lat)
+                        lon_f = float(lon)
+                    except Exception:
+                        lat_f, lon_f = None, None
+                if lat_f is None or lon_f is None:
+                    st.error("Could not determine coordinates. Provide valid lat/lon or a map link or click on the map below.")
+                else:
                     place = {
                         "name": name or f"Place {len(st.session_state['favorites'])+1}",
-                        "latitude": lat_f,
-                        "longitude": lon_f,
+                        "latitude": float(lat_f),
+                        "longitude": float(lon_f),
                         "description": description,
                         "tag": tag or "None"
                     }
                     st.session_state["favorites"].append(place)
                     st.success("Place added to favorites")
-                except Exception:
-                    st.error("Invalid latitude or longitude. Use decimal degrees (e.g., 0.3476, 32.5825).")
+
+        st.markdown("**Interactive map** — click to pick coordinates (click once to set).")
+        # show an interactive map centered on last favorite or default
+        if st.session_state["favorites"]:
+            center = st.session_state["favorites"][-1]
+            center_lat, center_lon = center.get("latitude", 0), center.get("longitude", 0)
+        else:
+            center_lat, center_lon = 0.3476, 32.5825  # Kampala default
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+        folium.TileLayer('OpenStreetMap').add_to(m)
+        folium.TileLayer('Stamen Terrain').add_to(m)
+        folium.LayerControl().add_to(m)
+        map_result = st_folium(m, width=700, height=450)
+        # st_folium returns last_clicked
+        last_click = map_result.get("last_clicked")
+        if last_click:
+            st.info(f"Map clicked at: {last_click['lat']:.6f}, {last_click['lng']:.6f}")
+            if st.button("Use clicked coordinates to add a new place", key="use_click_add"):
+                name_click = st.text_input("Name for clicked place", value=f"Place {len(st.session_state['favorites'])+1}", key="name_click")
+                place = {
+                    "name": name_click or f"Place {len(st.session_state['favorites'])+1}",
+                    "latitude": float(last_click["lat"]),
+                    "longitude": float(last_click["lng"]),
+                    "description": "",
+                    "tag": "None"
+                }
+                st.session_state["favorites"].append(place)
+                st.success("Place added from map click")
 
     # Favorites tab
     with tab3:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("<h4 style='margin:0'>Your Favorites</h4>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
+        st.markdown("<div class='card'><h4 style='margin:0'>Your Favorites</h4></div>", unsafe_allow_html=True)
         if not st.session_state["favorites"]:
-            st.info("No favorites yet. Add places from Explore or Add Place.")
+            st.info("No favorites yet. Add places from Add Place or Explore.")
         else:
-            # Search and tag filter
             search_query = st.text_input("Search favorites by name", key="fav_search")
             tags = sorted({fav.get("tag", "None") for fav in st.session_state["favorites"]})
             tag_options = ["All"] + [t for t in tags if t]
@@ -475,14 +417,13 @@ def main_app():
             if tag_filter != "All":
                 favorites_to_show = [f for f in favorites_to_show if f.get("tag","None") == tag_filter]
 
-            # List favorites with small controls
             for idx, fav in enumerate(favorites_to_show):
                 st.markdown(f"**{fav.get('name','Unknown')}**")
                 if fav.get("description"):
                     st.write(fav.get("description"))
-                if fav.get("latitude") and fav.get("longitude"):
-                    st.write(f"📍 {fav.get('latitude'):.6f}, {fav.get('longitude'):.6f}")
-                # Tagging UI
+                if "latitude" in fav and "longitude" in fav:
+                    st.write(f"📍 {fav['latitude']:.6f}, {fav['longitude']:.6f}")
+                # Tagging
                 current_tag = fav.get("tag", "None")
                 tag_choices = ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"]
                 if current_tag not in tag_choices:
@@ -495,7 +436,7 @@ def main_app():
                 else:
                     fav["tag"] = new_tag
 
-                # OSRM directions selector
+                # OSRM directions
                 if "latitude" in fav and "longitude" in fav and len(st.session_state["favorites"]) > 1:
                     other_favs = [f for f in st.session_state["favorites"] if f is not fav and "latitude" in f and "longitude" in f]
                     if other_favs:
@@ -515,7 +456,6 @@ def main_app():
                                 folium.Marker([chosen["latitude"], chosen["longitude"]], tooltip="Destination", icon=folium.Icon(color="red")).add_to(route_map)
                                 folium.TileLayer('OpenStreetMap').add_to(route_map)
                                 folium.TileLayer('Stamen Terrain').add_to(route_map)
-                                folium.TileLayer('CartoDB positron').add_to(route_map)
                                 folium.LayerControl().add_to(route_map)
                                 st.write(f"**Mode:** {mode.capitalize()}")
                                 if distance_km is not None:
@@ -539,14 +479,25 @@ def main_app():
                 first = coords[0]
                 fav_map = folium.Map(location=[first["latitude"], first["longitude"]], zoom_start=12)
                 marker_cluster = MarkerCluster().add_to(fav_map)
+                heat_points = []
                 for fav in coords:
                     folium.Marker(
                         [fav["latitude"], fav["longitude"]],
-                        popup=f"{fav.get('name','')}<br>{fav.get('address','')}<br>🏷️ {fav.get('tag','None')}",
+                        popup=f"{fav.get('name','')}<br>🏷️ {fav.get('tag','None')}",
                         tooltip=fav.get('name','')
                     ).add_to(marker_cluster)
-                st.subheader("Favorites Map")
-                st_folium(fav_map, width=700, height=500)
+                    heat_points.append([fav["latitude"], fav["longitude"]])
+                if st.checkbox("Show heatmap of favorites", value=False):
+                    HeatMap(heat_points, radius=15).add_to(fav_map)
+                folium.TileLayer('OpenStreetMap').add_to(fav_map)
+                folium.TileLayer('Stamen Terrain').add_to(fav_map)
+                folium.LayerControl().add_to(fav_map)
+                st.subheader("Favorites Map (interactive)")
+                map_out = st_folium(fav_map, width=900, height=500)
+                # show last clicked on favorites map
+                last = map_out.get("last_clicked")
+                if last:
+                    st.info(f"Map clicked at: {last['lat']:.6f}, {last['lng']:.6f}")
 
             # Export / Import / Clear
             df = pd.DataFrame(st.session_state["favorites"])
@@ -573,38 +524,41 @@ def main_app():
             mode_for_matrix = st.selectbox("Mode for matrix", ["driving", "walking", "cycling"], index=0, key="matrix_mode")
             if st.button("Compute pairwise matrix"):
                 with st.spinner("Computing pairwise matrix..."):
-                    matrix = compute_pairwise_matrix(st.session_state["favorites"], mode=mode_for_matrix)
-                if not matrix:
-                    st.info("No pairwise data available")
-                else:
-                    rows = []
-                    for r in matrix:
-                        dist = f"{r['distance_km']:.2f} km" if r['distance_km'] is not None else "N/A"
-                        if r['duration_min'] is not None:
-                            if r['duration_min'] >= 60:
-                                hrs = int(r['duration_min'] // 60)
-                                mins = int(r['duration_min'] % 60)
-                                dur = f"{hrs}h {mins}m"
-                            else:
-                                dur = f"{r['duration_min']:.1f} min"
-                        else:
-                            dur = "N/A"
-                        rows.append({"Origin": r["origin_name"], "Destination": r["dest_name"], "Distance": dist, "Duration": dur})
-                    df_matrix = pd.DataFrame(rows)
-                    st.dataframe(df_matrix, use_container_width=True)
+                    matrix = []
+                    n = len(st.session_state["favorites"])
+                    for i in range(n):
+                        a = st.session_state["favorites"][i]
+                        if "latitude" not in a or "longitude" not in a:
+                            continue
+                        for j in range(n):
+                            if i == j:
+                                continue
+                            b = st.session_state["favorites"][j]
+                            if "latitude" not in b or "longitude" not in b:
+                                continue
+                            _, dist, dur = get_osrm_route(a["latitude"], a["longitude"], b["latitude"], b["longitude"], mode=mode_for_matrix)
+                            matrix.append({
+                                "Origin": a.get("name", f"Fav {i}"),
+                                "Destination": b.get("name", f"Fav {j}"),
+                                "Distance": f"{dist:.2f} km" if dist is not None else "N/A",
+                                "Duration": (f"{int(dur//60)}h {int(dur%60)}m" if dur and dur>=60 else (f"{dur:.1f} min" if dur else "N/A"))
+                            })
+                    if not matrix:
+                        st.info("No pairwise data available")
+                    else:
+                        df_matrix = pd.DataFrame(matrix)
+                        st.dataframe(df_matrix, use_container_width=True)
 
 # -------------------------
 # App entry
 # -------------------------
 def run():
-    # If not logged in, show login/signup
     if not st.session_state["logged_in"]:
-        # show login/signup with logo
+        # show login/signup
         st.markdown("<div style='max-width:900px;margin:auto'>", unsafe_allow_html=True)
         show_login_signup()
         st.markdown("</div>", unsafe_allow_html=True)
         return
-    # else show main app
     main_app()
 
 if __name__ == "__main__":
