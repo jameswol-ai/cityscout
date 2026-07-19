@@ -5,9 +5,24 @@ import folium
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 import pandas as pd
-import polyline  # pip install polyline
 import math
 
+# -------------------------
+# Configuration
+# -------------------------
+BASE_URL = "http://localhost:8000"  # adjust if your backend runs elsewhere
+
+st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
+
+# -------------------------
+# Session state
+# -------------------------
+if "favorites" not in st.session_state:
+    st.session_state["favorites"] = []
+
+# -------------------------
+# Polyline decoder (self-contained)
+# -------------------------
 def decode_polyline(polyline_str):
     """Decode a Google-encoded polyline string to a list of (lat, lon) tuples."""
     if not polyline_str:
@@ -42,20 +57,6 @@ def decode_polyline(polyline_str):
         coordinates.append((lat / 1e5, lng / 1e5))
     return coordinates
 
-
-# -------------------------
-# Configuration
-# -------------------------
-BASE_URL = "http://localhost:8000"  # adjust if your backend runs elsewhere
-
-st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
-
-# -------------------------
-# Session state
-# -------------------------
-if "favorites" not in st.session_state:
-    st.session_state["favorites"] = []
-
 # -------------------------
 # OSRM helper
 # -------------------------
@@ -75,7 +76,7 @@ def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
         data = resp.json()
         if data.get("routes"):
             route = data["routes"][0]
-            coords = polyline.decode(route["geometry"])
+            coords = decode_polyline(route.get("geometry", ""))
             distance_km = route.get("distance", 0) / 1000.0
             duration_min = route.get("duration", 0) / 60.0
             return coords, distance_km, duration_min
@@ -297,7 +298,6 @@ with tab2:
                                 if distance_km is not None:
                                     st.write(f"📏 Distance: {distance_km:.2f} km")
                                 if duration_min is not None:
-                                    # show hours/minutes if long
                                     if duration_min >= 60:
                                         hours = int(duration_min // 60)
                                         mins = int(duration_min % 60)
@@ -344,7 +344,6 @@ with tab2:
                 if not matrix:
                     st.info("No pairwise data available (ensure favorites have coordinates).")
                 else:
-                    # Build DataFrame for display
                     rows = []
                     for r in matrix:
                         dist = f"{r['distance_km']:.2f} km" if r['distance_km'] is not None else "N/A"
