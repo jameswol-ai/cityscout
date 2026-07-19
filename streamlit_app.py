@@ -86,6 +86,9 @@ with tab1:
                         if "address" in item:
                             st.write(f"📍 {item['address']}")
                         if st.button(f"Add to Favorites: {item.get('name','Unknown')}", key=item.get("id", item.get("name"))):
+                            # Add tag field if missing
+                            if "tag" not in item:
+                                item["tag"] = "None"
                             st.session_state["favorites"].append(item)
                             st.success(f"Added {item.get('name','Unknown')} to Favorites")
                         st.write("---")
@@ -127,58 +130,89 @@ with tab2:
     if not st.session_state["favorites"]:
         st.info("No favorites saved yet.")
     else:
-        for fav in st.session_state["favorites"]:
-            st.markdown(f"**{fav.get('name','Unknown')}**")
-            st.write(fav.get("description", "No description available"))
-            if "rating" in fav:
-                st.write(f"⭐ Rating: {fav['rating']}")
-            if "price" in fav:
-                st.write(f"💲 Price: {fav['price']}")
-            if "address" in fav:
-                st.write(f"📍 {fav['address']}")
-            st.write("---")
+        # Search bar for favorites
+        search_query = st.text_input("🔎 Search favorites by name")
 
-        # Export favorites to CSV
-        df = pd.DataFrame(st.session_state["favorites"])
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Export Favorites to CSV",
-            data=csv,
-            file_name="cityscout_favorites.csv",
-            mime="text/csv"
-        )
+        # Tag filter
+        tag_filter = st.selectbox("🏷️ Filter by tag", ["All", "Food", "Nightlife", "Shopping", "Attractions", "Custom"])
 
-        # Clear favorites button
-        if st.button("🗑️ Clear Favorites"):
-            st.session_state["favorites"] = []
-            st.success("Favorites cleared successfully!")
+        # Filter favorites by search query and tag
+        favorites_to_show = st.session_state["favorites"]
+        if search_query:
+            favorites_to_show = [
+                fav for fav in favorites_to_show
+                if search_query.lower() in fav.get("name", "").lower()
+            ]
+        if tag_filter != "All":
+            favorites_to_show = [
+                fav for fav in favorites_to_show
+                if fav.get("tag", "None") == tag_filter
+            ]
 
-        # Favorites Map
-        st.subheader("🗺️ Favorites Map")
-        first = st.session_state["favorites"][0]
-        lat = first.get("latitude", 0)
-        lon = first.get("longitude", 0)
-        fav_map = folium.Map(location=[lat, lon], zoom_start=13)
-        marker_cluster = MarkerCluster().add_to(fav_map)
+        if not favorites_to_show:
+            st.warning("No favorites match your search or tag filter.")
+        else:
+            for idx, fav in enumerate(favorites_to_show):
+                st.markdown(f"**{fav.get('name','Unknown')}**")
+                st.write(fav.get("description", "No description available"))
+                if "rating" in fav:
+                    st.write(f"⭐ Rating: {fav['rating']}")
+                if "price" in fav:
+                    st.write(f"💲 Price: {fav['price']}")
+                if "address" in fav:
+                    st.write(f"📍 {fav['address']}")
 
-        for fav in st.session_state["favorites"]:
-            if "latitude" in fav and "longitude" in fav:
-                folium.Marker(
-                    [fav["latitude"], fav["longitude"]],
-                    popup=f"{fav['name']}<br>{fav.get('address','')}",
-                    tooltip=fav["name"]
-                ).add_to(marker_cluster)
+                # Tagging system
+                current_tag = fav.get("tag", "None")
+                new_tag = st.selectbox(
+                    f"Assign a tag to {fav.get('name','Unknown')}",
+                    ["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"],
+                    index=["None", "Food", "Nightlife", "Shopping", "Attractions", "Custom"].index(current_tag) if current_tag in ["None","Food","Nightlife","Shopping","Attractions","Custom"] else 0,
+                    key=f"tag_{idx}"
+                )
+                if new_tag == "Custom":
+                    custom_tag = st.text_input(f"Enter custom tag for {fav.get('name','Unknown')}", key=f"custom_tag_{idx}")
+                    if custom_tag:
+                        fav["tag"] = custom_tag
+                else:
+                    fav["tag"] = new_tag
 
-        st_folium(fav_map, width=700, height=500)
+                st.write(f"🏷️ Current Tag: {fav['tag']}")
+                st.write("---")
+
+            # Export favorites to CSV (with tags included)
+            df = pd.DataFrame(favorites_to_show)
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Export Favorites to CSV",
+                data=csv,
+                file_name="cityscout_favorites.csv",
+                mime="text/csv"
+            )
+
+            # Clear favorites button
+            if st.button("🗑️ Clear Favorites"):
+                st.session_state["favorites"] = []
+                st.success("Favorites cleared successfully!")
+
+            # Favorites Map
+            st.subheader("🗺️ Favorites Map")
+            first = favorites_to_show[0]
+            lat = first.get("latitude", 0)
+            lon = first.get("longitude", 0)
+            fav_map = folium.Map(location=[lat, lon], zoom_start=13)
+            marker_cluster = MarkerCluster().add_to(fav_map)
+
+            for fav in favorites_to_show:
+                if "latitude" in fav and "longitude" in fav:
+                    folium.Marker(
+                        [fav["latitude"], fav["longitude"]],
+                        popup=f"{fav['name']}<br>{fav.get('address','')}<br>🏷️ {fav.get('tag','None')}",
+                        tooltip=fav["name"]
+                    ).add_to(marker_cluster)
+
+            st_folium(fav_map, width=700, height=500)
 
     # Import favorites from CSV
     st.subheader("📤 Import Favorites from CSV")
-    uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
-    if uploaded_file is not None:
-        try:
-            imported_df = pd.read_csv(uploaded_file)
-            imported_records = imported_df.to_dict(orient="records")
-            st.session_state["favorites"].extend(imported_records)
-            st.success("Favorites imported successfully!")
-        except Exception as e:
-            st.error(f"Failed to import CSV: {e}")
+    uploaded_file = st.file_uploader
