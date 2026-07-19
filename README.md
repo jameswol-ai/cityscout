@@ -21,3 +21,20 @@ https://cityscout.ai.studio
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+# CityScout (Streamlit)
+
+CityScout is a Streamlit frontend that explores places, saves favorites, and integrates Google Maps features:
+- Google Places enrichment (ratings, address, photos)
+- Google Places Photo fetching (embedded in the UI)
+- Google Directions (routes and polylines drawn on Folium maps)
+- Folium clustering and heatmaps
+- Favorites: search, tags, import/export, map
+
+## Setup
+
+1. Clone the repo and place `streamlit_app.py`, `requirements.txt`, and this README in the project root.
+
+2. Install Python dependencies:
+```bash
+pip install -r requirements.txt
