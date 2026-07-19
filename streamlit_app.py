@@ -1,10 +1,11 @@
 # streamlit_app.py
 """
-CityScout - Updated Streamlit app (single file)
+CityScout - Single-file Streamlit app (updated)
 
-Features implemented:
+Features:
 - Centered SVG logo at the top of every page (only image asset)
-- Login / Sign up via FastAPI JWT auth server (AUTH_URL env var)
+- Login / Sign up via FastAPI JWT auth server (AUTH_URL env var) with local fallback
+- Auto-creates a demo user (demo/demo123) in local fallback mode
 - Per-user persistent places stored in USER_DATA_DIR as JSON
 - Add places by map link (Google, Apple, PetalMaps, Bing, OSM short links supported)
 - Click-to-add on interactive map (st_folium)
@@ -13,7 +14,6 @@ Features implemented:
 - Interactive maps via folium + st_folium; tile layers include attribution
 - OSRM routing (driving/walking/cycling) with in-memory caching
 - Black theme, fixed font, no appearance controls
-- Robust short-link resolution (maps.app.goo.gl etc.)
 - CSV import/export and pairwise matrix
 """
 
@@ -60,6 +60,11 @@ if "places" not in st.session_state:
     st.session_state["places"] = []
 if "categories" not in st.session_state:
     st.session_state["categories"] = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "Transit", "Other"]
+if "auth_mode" not in st.session_state:
+    # "remote" when auth server used successfully, "local" when fallback to users.json
+    st.session_state["auth_mode"] = None
+
+USERS_FILE = os.path.join(USER_DATA_DIR, "users.json")
 
 # -------------------------
 # SVG logo (single, centered)
@@ -139,15 +144,52 @@ def save_user_places(username: str, places):
         pass
 
 # -------------------------
+# Local users.json helpers (fallback)
+# -------------------------
+def load_local_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_local_users(users: dict):
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, indent=2)
+    except Exception:
+        pass
+
+def create_local_user(username: str, password: str) -> bool:
+    users = load_local_users()
+    if username in users:
+        return False
+    users[username] = {"password_hash": hashlib.sha256(password.encode()).hexdigest()}
+    save_local_users(users)
+    return True
+
+def verify_local_user(username: str, password: str) -> bool:
+    users = load_local_users()
+    if username not in users:
+        return False
+    return users[username].get("password_hash") == hashlib.sha256(password.encode()).hexdigest()
+
+def ensure_demo_local_user():
+    users = load_local_users()
+    if "demo" not in users:
+        users["demo"] = {"password_hash": hashlib.sha256("demo123".encode()).hexdigest()}
+        save_local_users(users)
+
+# -------------------------
 # Short URL resolution and map link parsing
 # -------------------------
 def resolve_short_url(url: str, timeout: int = 8) -> str:
     try:
-        # HEAD first to follow redirects cheaply
         resp = requests.head(url, allow_redirects=True, timeout=timeout)
         final = resp.url or url
         if final == url:
-            # some shorteners require GET
             resp = requests.get(url, allow_redirects=True, timeout=timeout)
             final = resp.url or url
         return final
@@ -155,57 +197,39 @@ def resolve_short_url(url: str, timeout: int = 8) -> str:
         return url
 
 def parse_map_link(url: str) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Extract lat, lon from common map link formats:
-    - Google Maps (/@lat,lon or q=lat,lon)
-    - maps.app.goo.gl short links (resolved)
-    - OpenStreetMap (#map=zoom/lat/lon or mlat/mlon)
-    - PetalMaps (/place/lat,lon)
-    - Apple Maps (q=lat,lon or ll=lat,lon)
-    - Bing (cp=lat~lon)
-    - Generic fallback: first two floats
-    """
     if not url or not isinstance(url, str):
         return None, None
     s = url.strip()
     s = resolve_short_url(s)
 
-    # Google Maps @lat,lon
     m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # Google q=lat,lon or query
     m = re.search(r'[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # OpenStreetMap mlat/mlon
     m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # OSM #map=zoom/lat/lon
     m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # PetalMaps /place/lat,lon
     m = re.search(r'/place/(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # Apple Maps q=lat,lon or ll=lat,lon
     m = re.search(r'[?&](?:q|ll)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # Bing cp=lat~lon
     m = re.search(r'[?&]cp=(-?\d+\.\d+)~(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
 
-    # Generic fallback: first two floats separated by comma or space
     m = re.search(r'(-?\d+\.\d+)[, ]+(-?\d+\.\d+)', s)
     if m:
         return float(m.group(1)), float(m.group(2))
@@ -264,8 +288,27 @@ def decode_polyline(polyline_str: str):
     return coordinates
 
 # -------------------------
-# OSRM route helper with caching
+# In-memory TTL cache for OSRM
 # -------------------------
+class InMemoryCache:
+    def __init__(self):
+        self.store = {}
+    def _now(self):
+        return int(time.time())
+    def get(self, key):
+        entry = self.store.get(key)
+        if not entry:
+            return None
+        value, expires_at = entry
+        if self._now() > expires_at:
+            del self.store[key]
+            return None
+        return value
+    def set(self, key, value, ttl):
+        self.store[key] = (value, self._now() + ttl)
+
+mem_cache = InMemoryCache()
+
 def _osrm_cache_key(lat1, lon1, lat2, lon2, mode):
     return f"osrm:{mode}:{lat1:.6f},{lon1:.6f}:{lat2:.6f},{lon2:.6f}"
 
@@ -296,7 +339,7 @@ def get_osrm_route(lat1: float, lon1: float, lat2: float, lon2: float, mode: str
     return [], None, None
 
 # -------------------------
-# Auth helpers (FastAPI)
+# Auth helpers (FastAPI remote + local fallback)
 # -------------------------
 def call_auth_signup(username: str, password: str) -> Optional[str]:
     try:
@@ -366,57 +409,6 @@ def delete_place(place_id: str):
         save_user_places(st.session_state["username"], st.session_state["places"])
 
 # -------------------------
-# UI: centered logo and login
-# -------------------------
-def top_logo():
-    inject_css()
-    svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
-    st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
-    st.markdown(svg, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-def show_login_page():
-    inject_css()
-    svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
-    st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
-    st.markdown(svg, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("<div class='small-muted'>Sign in or create an account to continue</div>", unsafe_allow_html=True)
-
-    username = st.text_input("Username", key="login_user", placeholder="username")
-    password = st.text_input("Password", type="password", key="login_pass", placeholder="password")
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("Login", key="btn_login"):
-            token = call_auth_login(username, password)
-            if token:
-                info = verify_token(token)
-                if info and info.get("username") == username:
-                    st.session_state["access_token"] = token
-                    st.session_state["username"] = username
-                    st.session_state["places"] = load_user_places(username)
-                    st.success("Logged in")
-                else:
-                    st.error("Login succeeded but token verification failed.")
-            else:
-                st.error("Login failed. Check credentials or auth server.")
-    with col2:
-        if st.button("Sign up", key="btn_signup"):
-            token = call_auth_signup(username, password)
-            if token:
-                info = verify_token(token)
-                if info and info.get("username") == username:
-                    st.session_state["access_token"] = token
-                    st.session_state["username"] = username
-                    st.session_state["places"] = load_user_places(username)
-                    st.success("Account created and logged in")
-                else:
-                    st.error("Sign up succeeded but token verification failed.")
-            else:
-                st.error("Sign up failed (username may already exist).")
-
-# -------------------------
 # Explore backend helper (safe)
 # -------------------------
 def fetch_explore_from_backend(city: str, category: str):
@@ -440,6 +432,84 @@ def fetch_explore_from_backend(city: str, category: str):
     except Exception:
         st.error("Explore fetch failed: backend unreachable or returned unexpected data.")
         return []
+
+# -------------------------
+# UI: centered logo and login (with fallback)
+# -------------------------
+def top_logo():
+    inject_css()
+    svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
+    st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
+    st.markdown(svg, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def show_login_page():
+    inject_css()
+    svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
+    st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
+    st.markdown(svg, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='small-muted'>Sign in or create an account to continue</div>", unsafe_allow_html=True)
+
+    # Ensure demo local user exists for fallback testing
+    ensure_demo_local_user()
+
+    username = st.text_input("Username", key="login_user", placeholder="username")
+    password = st.text_input("Password", type="password", key="login_pass", placeholder="password")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Login", key="btn_login"):
+            # Try remote auth first
+            token = call_auth_login(username, password)
+            if token:
+                info = verify_token(token)
+                if info and info.get("username") == username:
+                    st.session_state["access_token"] = token
+                    st.session_state["username"] = username
+                    st.session_state["auth_mode"] = "remote"
+                    st.session_state["places"] = load_user_places(username)
+                    st.success("Logged in (remote auth)")
+                    return
+                else:
+                    st.error("Login succeeded but token verification failed.")
+                    return
+            # Remote failed -> try local fallback
+            if verify_local_user(username, password):
+                st.session_state["access_token"] = None
+                st.session_state["username"] = username
+                st.session_state["auth_mode"] = "local"
+                st.session_state["places"] = load_user_places(username)
+                st.success("Logged in (local fallback)")
+            else:
+                st.error("Login failed. Check credentials or auth server.")
+    with col2:
+        if st.button("Sign up", key="btn_signup"):
+            # Try remote signup first
+            token = call_auth_signup(username, password)
+            if token:
+                info = verify_token(token)
+                if info and info.get("username") == username:
+                    st.session_state["access_token"] = token
+                    st.session_state["username"] = username
+                    st.session_state["auth_mode"] = "remote"
+                    st.session_state["places"] = load_user_places(username)
+                    st.success("Account created and logged in (remote auth)")
+                    return
+                else:
+                    st.error("Sign up succeeded but token verification failed.")
+                    return
+            # Remote signup failed -> create local user
+            created = create_local_user(username, password)
+            if created:
+                st.session_state["access_token"] = None
+                st.session_state["username"] = username
+                st.session_state["auth_mode"] = "local"
+                st.session_state["places"] = []
+                save_user_places(username, st.session_state["places"])
+                st.success("Account created and logged in (local fallback)")
+            else:
+                st.error("Sign up failed (username may already exist).")
 
 # -------------------------
 # Main application UI
@@ -472,10 +542,9 @@ def main_app():
                 add_place("Sample Place", 0.3476, 32.5825, "Sample", category="Attractions", favorite=False)
                 st.success("Sample place added")
         with c2:
-            if st.button("Export places (CSV)"):
-                df = pd.DataFrame(st.session_state["places"])
-                csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button("Download CSV", data=csv, file_name="places.csv", mime="text/csv")
+            df = pd.DataFrame(st.session_state["places"])
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("Export places (CSV)", data=csv, file_name="places.csv", mime="text/csv")
         with c3:
             if st.button("Clear all places"):
                 st.session_state["places"] = []
@@ -659,6 +728,7 @@ def main_app():
     with tabs[5]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Settings</h3></div>", unsafe_allow_html=True)
         st.write(f"Logged in as: **{st.session_state.get('username') or 'guest'}**")
+        st.write(f"Auth mode: **{st.session_state.get('auth_mode') or 'unknown'}**")
         if st.button("Logout (end session)"):
             logout_user()
             st.experimental_rerun()
@@ -667,19 +737,23 @@ def main_app():
 # App entry
 # -------------------------
 def run():
-    # If token exists, verify and load user places
+    # If token exists, verify remote token; if invalid, clear
     token = st.session_state.get("access_token")
     username = st.session_state.get("username")
     if token and username:
         info = verify_token(token)
         if not info or info.get("username") != username:
-            logout_user()
+            # remote token invalid -> clear
+            st.session_state["access_token"] = None
+            st.session_state["username"] = None
+            st.session_state["auth_mode"] = None
 
+    # If no username, show login
     if not st.session_state.get("username"):
         show_login_page()
         return
 
-    # ensure user's places loaded
+    # Ensure user's places loaded
     if st.session_state.get("username") and not st.session_state.get("places"):
         st.session_state["places"] = load_user_places(st.session_state["username"])
 
