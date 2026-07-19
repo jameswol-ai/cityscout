@@ -11,6 +11,9 @@ View your app in AI Studio: https://ai.studio/apps/a60daf2d-dda8-4965-b9b9-63b14
 or 
 https://cityscout.ai.studio
 
+or 
+https://cityscout.streamlit.app/
+
 ## Run Locally
 
 **Prerequisites:**  Node.js
