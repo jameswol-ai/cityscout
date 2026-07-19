@@ -148,6 +148,29 @@ with tab2:
             mime="text/csv"
         )
 
+        # Clear favorites button
+        if st.button("🗑️ Clear Favorites"):
+            st.session_state["favorites"] = []
+            st.success("Favorites cleared successfully!")
+
+        # Favorites Map
+        st.subheader("🗺️ Favorites Map")
+        first = st.session_state["favorites"][0]
+        lat = first.get("latitude", 0)
+        lon = first.get("longitude", 0)
+        fav_map = folium.Map(location=[lat, lon], zoom_start=13)
+        marker_cluster = MarkerCluster().add_to(fav_map)
+
+        for fav in st.session_state["favorites"]:
+            if "latitude" in fav and "longitude" in fav:
+                folium.Marker(
+                    [fav["latitude"], fav["longitude"]],
+                    popup=f"{fav['name']}<br>{fav.get('address','')}",
+                    tooltip=fav["name"]
+                ).add_to(marker_cluster)
+
+        st_folium(fav_map, width=700, height=500)
+
     # Import favorites from CSV
     st.subheader("📤 Import Favorites from CSV")
     uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
