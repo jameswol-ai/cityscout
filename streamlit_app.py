@@ -1,39 +1,46 @@
 # streamlit_app.py
 """
-CityScout - Updated
-- Fixes fetch/explore flow
-- Logo centered at top
-- Categories management (create, assign, filter)
-- More tabs/panels (Dashboard, Explore, Add Place, Favorites, Settings)
-- Only one image (SVG logo) used; all other images removed
-- Places provide external links for Apple Maps, Google, PetalMaps, Bing, OpenStreetMap
-- Map display uses CartoDB / Stamen tiles (legal attributions included)
-- For "open in Apple Maps" the app provides maps.apple.com links (cannot embed Apple tiles)
-- Robust parsing for short links (maps.app.goo.gl etc.)
-- Black theme, fixed font, no appearance controls
+CityScout - Updated Streamlit app (single file)
+
+Features implemented:
+- Centered SVG logo at the top of every page (only image asset)
+- Login / Sign up via FastAPI JWT auth server (AUTH_URL env var)
+- Per-user persistent places stored in USER_DATA_DIR as JSON
+- Add places by map link (Google, Apple, PetalMaps, Bing, OSM short links supported)
+- Click-to-add on interactive map (st_folium)
+- Categories management, favorites flag, edit/delete places
+- External links: maps.apple.com, Google Maps, PetalMaps, Bing, OpenStreetMap
+- Interactive maps via folium + st_folium; tile layers include attribution
 - OSRM routing (driving/walking/cycling) with in-memory caching
-- Edit / delete places, mark favorites, categories per place
+- Black theme, fixed font, no appearance controls
+- Robust short-link resolution (maps.app.goo.gl etc.)
+- CSV import/export and pairwise matrix
 """
 
+from __future__ import annotations
 import os
 import re
 import json
 import time
 import hashlib
-import urllib.parse
-import streamlit as st
 import requests
+import streamlit as st
 import folium
+import pandas as pd
+from typing import Optional, Tuple
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
-import pandas as pd
 
 # -------------------------
 # Configuration
 # -------------------------
-BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")  # backend /explore
-USERS_FILE = os.getenv("USERS_FILE", "users.json")
-OSRM_ROUTE_TTL = 3600  # seconds
+AUTH_URL = os.getenv("AUTH_URL", "http://localhost:8000")  # FastAPI auth server
+AUTH_VERIFY_TIMEOUT = int(os.getenv("AUTH_VERIFY_TIMEOUT", "6"))
+USER_DATA_DIR = os.getenv("USER_DATA_DIR", "./user_data")
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")  # optional explore backend
+OSRM_ROUTE_TTL = int(os.getenv("OSRM_ROUTE_TTL", "3600"))
 
 # Visual constants (fixed)
 APP_BG = "#000000"
@@ -45,63 +52,188 @@ st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
 # -------------------------
 # Session defaults
 # -------------------------
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
+if "access_token" not in st.session_state:
+    st.session_state["access_token"] = None
 if "username" not in st.session_state:
     st.session_state["username"] = None
 if "places" not in st.session_state:
-    st.session_state["places"] = []  # list of place dicts
+    st.session_state["places"] = []
 if "categories" not in st.session_state:
     st.session_state["categories"] = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "Transit", "Other"]
 
 # -------------------------
-# Utilities: users
+# SVG logo (single, centered)
 # -------------------------
-def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+APP_SVG_LOGO = """
+<svg width="120" height="120" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <rect rx="18" width="100" height="100" fill="{color}"/>
+  <g transform="translate(18,18)" fill="#fff">
+    <path d="M12 2c-5.5 0-10 4.5-10 10 0 7.5 10 18 10 18s10-10.5 10-18c0-5.5-4.5-10-10-10z"/>
+    <circle cx="12" cy="12" r="3"/>
+  </g>
+</svg>
+"""
 
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        return {}
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+# -------------------------
+# Minimal CSS (black background, centered logo)
+# -------------------------
+def inject_css():
+    css = f"""
+    <style>
+    html, body, .stApp {{
+      background: {APP_BG} !important;
+      color: #e6e6e6 !important;
+      font-family: {APP_FONT} !important;
+    }}
+    .card {{
+      background: rgba(255,255,255,0.03);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .logo-top {{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:18px 0 6px 0;
+    }}
+    .logo-top svg {{ display:block; margin:0 auto; }}
+    .small-muted {{ color: #9ca3af; font-size:0.95rem; text-align:center; }}
+    .btn-primary {{
+      background: {APP_PRIMARY};
+      color: white;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+    }}
+    a.map-link {{ color: #9ad0ff; text-decoration: underline; }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
 
-def save_users(users):
+# -------------------------
+# Per-user storage helpers
+# -------------------------
+def _user_places_path(username: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", username)
+    return os.path.join(USER_DATA_DIR, f"{safe}_places.json")
+
+def load_user_places(username: str):
+    path = _user_places_path(username)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_user_places(username: str, places):
+    path = _user_places_path(username)
     try:
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(places, f, indent=2)
     except Exception:
         pass
 
 # -------------------------
-# In-memory TTL cache
+# Short URL resolution and map link parsing
 # -------------------------
-class InMemoryCache:
-    def __init__(self):
-        self.store = {}
-    def _now(self):
-        return int(time.time())
-    def get(self, key):
-        entry = self.store.get(key)
-        if not entry:
-            return None
-        value, expires_at = entry
-        if self._now() > expires_at:
-            del self.store[key]
-            return None
-        return value
-    def set(self, key, value, ttl):
-        self.store[key] = (value, self._now() + ttl)
+def resolve_short_url(url: str, timeout: int = 8) -> str:
+    try:
+        # HEAD first to follow redirects cheaply
+        resp = requests.head(url, allow_redirects=True, timeout=timeout)
+        final = resp.url or url
+        if final == url:
+            # some shorteners require GET
+            resp = requests.get(url, allow_redirects=True, timeout=timeout)
+            final = resp.url or url
+        return final
+    except Exception:
+        return url
 
-mem_cache = InMemoryCache()
+def parse_map_link(url: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Extract lat, lon from common map link formats:
+    - Google Maps (/@lat,lon or q=lat,lon)
+    - maps.app.goo.gl short links (resolved)
+    - OpenStreetMap (#map=zoom/lat/lon or mlat/mlon)
+    - PetalMaps (/place/lat,lon)
+    - Apple Maps (q=lat,lon or ll=lat,lon)
+    - Bing (cp=lat~lon)
+    - Generic fallback: first two floats
+    """
+    if not url or not isinstance(url, str):
+        return None, None
+    s = url.strip()
+    s = resolve_short_url(s)
+
+    # Google Maps @lat,lon
+    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # Google q=lat,lon or query
+    m = re.search(r'[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # OpenStreetMap mlat/mlon
+    m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # OSM #map=zoom/lat/lon
+    m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # PetalMaps /place/lat,lon
+    m = re.search(r'/place/(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # Apple Maps q=lat,lon or ll=lat,lon
+    m = re.search(r'[?&](?:q|ll)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # Bing cp=lat~lon
+    m = re.search(r'[?&]cp=(-?\d+\.\d+)~(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # Generic fallback: first two floats separated by comma or space
+    m = re.search(r'(-?\d+\.\d+)[, ]+(-?\d+\.\d+)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    return None, None
 
 # -------------------------
-# Polyline decoder
+# External map link generators
 # -------------------------
-def decode_polyline(polyline_str):
+def google_maps_link(lat: float, lon: float) -> str:
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+def apple_maps_link(lat: float, lon: float) -> str:
+    return f"https://maps.apple.com/?q={lat},{lon}"
+
+def petal_maps_link(lat: float, lon: float) -> str:
+    return f"https://map.petalmaps.com/?q={lat},{lon}"
+
+def bing_maps_link(lat: float, lon: float) -> str:
+    return f"https://www.bing.com/maps?cp={lat}~{lon}"
+
+def osm_link(lat: float, lon: float, zoom: int = 16) -> str:
+    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map={zoom}/{lat}/{lon}"
+
+# -------------------------
+# Polyline decoder (Google encoded polyline)
+# -------------------------
+def decode_polyline(polyline_str: str):
     if not polyline_str:
         return []
     index, lat, lng = 0, 0, 0
@@ -132,12 +264,12 @@ def decode_polyline(polyline_str):
     return coordinates
 
 # -------------------------
-# OSRM helper with caching
+# OSRM route helper with caching
 # -------------------------
 def _osrm_cache_key(lat1, lon1, lat2, lon2, mode):
     return f"osrm:{mode}:{lat1:.6f},{lon1:.6f}:{lat2:.6f},{lon2:.6f}"
 
-def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
+def get_osrm_route(lat1: float, lon1: float, lat2: float, lon2: float, mode: str = "driving"):
     key = _osrm_cache_key(lat1, lon1, lat2, lon2, mode)
     cached = mem_cache.get(key)
     if cached is not None:
@@ -164,167 +296,46 @@ def get_osrm_route(lat1, lon1, lat2, lon2, mode="driving"):
     return [], None, None
 
 # -------------------------
-# Resolve short URLs (follow redirects)
+# Auth helpers (FastAPI)
 # -------------------------
-def resolve_short_url(url: str, timeout=8):
+def call_auth_signup(username: str, password: str) -> Optional[str]:
     try:
-        resp = requests.head(url, allow_redirects=True, timeout=timeout)
-        final = resp.url
-        if not final or final == url:
-            resp = requests.get(url, allow_redirects=True, timeout=timeout)
-            final = resp.url
-        return final
+        r = requests.post(f"{AUTH_URL}/signup", json={"username": username, "password": password}, timeout=AUTH_VERIFY_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("access_token")
     except Exception:
-        return url
+        return None
 
-# -------------------------
-# Map link parsing (Google, OSM, PetalMaps, Apple, Bing)
-# -------------------------
-def parse_map_link(url: str):
-    if not url or not isinstance(url, str):
-        return None, None
-    url = url.strip()
-    resolved = resolve_short_url(url)
-    s = resolved
+def call_auth_login(username: str, password: str) -> Optional[str]:
+    try:
+        r = requests.post(f"{AUTH_URL}/login", json={"username": username, "password": password}, timeout=AUTH_VERIFY_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("access_token")
+    except Exception:
+        return None
 
-    # Google Maps @lat,lon
-    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # Google q=lat,lon or query
-    m = re.search(r'[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # OSM mlat/mlon
-    m = re.search(r'[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # OSM #map=zoom/lat/lon
-    m = re.search(r'#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # PetalMaps /place/lat,lon
-    m = re.search(r'/place/(-?\d+\.\d+),(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # Apple Maps q=lat,lon or ll=lat,lon
-    m = re.search(r'[?&](?:q|ll)=(-?\d+\.\d+),(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # Bing cp=lat~lon
-    m = re.search(r'[?&]cp=(-?\d+\.\d+)~(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    # Generic fallback: first two floats separated by comma
-    m = re.search(r'(-?\d+\.\d+)[, ]+(-?\d+\.\d+)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-    return None, None
+def verify_token(token: str) -> Optional[dict]:
+    if not token:
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(f"{AUTH_URL}/me", headers=headers, timeout=AUTH_VERIFY_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
-# -------------------------
-# External map link generators
-# -------------------------
-def google_maps_link(lat, lon):
-    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-
-def osm_link(lat, lon, zoom=16):
-    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map={zoom}/{lat}/{lon}"
-
-def petal_maps_link(lat, lon):
-    return f"https://map.petalmaps.com/?q={lat},{lon}"
-
-def apple_maps_link(lat, lon):
-    # maps.apple.com link
-    return f"https://maps.apple.com/?q={lat},{lon}"
-
-def bing_maps_link(lat, lon):
-    return f"https://www.bing.com/maps?cp={lat}~{lon}"
-
-# -------------------------
-# SVG logo (single)
-# -------------------------
-APP_SVG_LOGO = """
-<svg width="120" height="120" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <rect rx="18" width="100" height="100" fill="{color}"/>
-  <g transform="translate(18,18)" fill="#fff">
-    <path d="M12 2c-5.5 0-10 4.5-10 10 0 7.5 10 18 10 18s10-10.5 10-18c0-5.5-4.5-10-10-10z"/>
-    <circle cx="12" cy="12" r="3"/>
-  </g>
-</svg>
-"""
-
-# -------------------------
-# Minimal CSS (black background)
-# -------------------------
-def inject_css():
-    css = f"""
-    <style>
-    html, body, .stApp {{
-      background: {APP_BG} !important;
-      color: #e6e6e6 !important;
-      font-family: {APP_FONT} !important;
-    }}
-    .card {{
-      background: rgba(255,255,255,0.03);
-      border-radius: 10px;
-      padding: 12px;
-      margin-bottom: 12px;
-      border: 1px solid rgba(255,255,255,0.06);
-    }}
-    .logo-top {{ display:flex; align-items:center; justify-content:center; padding:12px 0 6px 0; }}
-    .small-muted {{ color: #9ca3af; font-size:0.95rem; }}
-    .btn-animated {{
-      background: {APP_PRIMARY};
-      color: white;
-      padding: 10px 14px;
-      border-radius: 10px;
-      border: none;
-      cursor: pointer;
-      box-shadow: 0 8px 24px rgba(11,110,253,0.12);
-    }}
-    a.map-link {{ color: #9ad0ff; text-decoration: underline; }}
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-
-# -------------------------
-# Authentication UI (logo centered top)
-# -------------------------
-def show_logo_only_login():
-    inject_css()
-    svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
-    st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
-    st.markdown(svg, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center; margin-bottom:8px;'><div class='small-muted'>Sign in to continue</div></div>", unsafe_allow_html=True)
-    username = st.text_input("Username", key="login_user", placeholder="username")
-    password = st.text_input("Password", type="password", key="login_pass", placeholder="password")
-    col1, col2 = st.columns([1,1])
-    with col1:
-        if st.button("Login", key="btn_login"):
-            users = load_users()
-            if username in users and users[username]["password_hash"] == _hash_password(password):
-                st.session_state["logged_in"] = True
-                st.session_state["username"] = username
-            else:
-                st.error("Invalid username or password")
-    with col2:
-        if st.button("Sign up", key="btn_signup"):
-            if not username or not password:
-                st.error("Provide username and password")
-            else:
-                users = load_users()
-                if username in users:
-                    st.error("Username exists")
-                else:
-                    users[username] = {"password_hash": _hash_password(password)}
-                    save_users(users)
-                    st.success("Account created. Log in now.")
+def logout_user():
+    st.session_state["access_token"] = None
+    st.session_state["username"] = None
+    st.session_state["places"] = []
 
 # -------------------------
 # Place helpers
 # -------------------------
-def add_place(name, lat, lon, description="", category="Other", favorite=False, source_link=None):
+def add_place(name: str, lat: float, lon: float, description: str = "", category: str = "Other", favorite: bool = False, source_link: str = "") -> dict:
     place = {
         "id": hashlib.sha1(f"{name}{lat}{lon}{time.time()}".encode()).hexdigest()[:12],
         "name": name,
@@ -336,88 +347,143 @@ def add_place(name, lat, lon, description="", category="Other", favorite=False, 
         "source_link": source_link or ""
     }
     st.session_state["places"].append(place)
+    if st.session_state.get("username"):
+        save_user_places(st.session_state["username"], st.session_state["places"])
     return place
 
-def update_place(place_id, **fields):
+def update_place(place_id: str, **fields) -> Optional[dict]:
     for p in st.session_state["places"]:
         if p.get("id") == place_id:
             p.update(fields)
+            if st.session_state.get("username"):
+                save_user_places(st.session_state["username"], st.session_state["places"])
             return p
     return None
 
-def delete_place(place_id):
+def delete_place(place_id: str):
     st.session_state["places"] = [p for p in st.session_state["places"] if p.get("id") != place_id]
+    if st.session_state.get("username"):
+        save_user_places(st.session_state["username"], st.session_state["places"])
 
 # -------------------------
-# Fetch explore (fixed)
-# -------------------------
-def fetch_explore_from_backend(city: str, category: str):
-    """
-    Calls backend /explore and returns list of results.
-    Handles network errors gracefully.
-    """
-    try:
-        resp = requests.get(f"{BASE_URL}/explore", params={"city": city, "category": category}, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results", [])
-        # normalize: ensure lat/lon present
-        normalized = []
-        for r in results:
-            if "latitude" in r and "longitude" in r:
-                normalized.append(r)
-            else:
-                # try to parse a link field if present
-                link = r.get("url") or r.get("link") or r.get("maps_link") or ""
-                lat, lon = parse_map_link(link)
-                if lat is not None and lon is not None:
-                    r["latitude"] = lat
-                    r["longitude"] = lon
-                    normalized.append(r)
-        return normalized
-    except Exception as e:
-        # return empty and log to console
-        st.error("Explore fetch failed (backend unreachable or returned error).")
-        return []
-
-# -------------------------
-# Top bar and main app
+# UI: centered logo and login
 # -------------------------
 def top_logo():
+    inject_css()
     svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
     st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
     st.markdown(svg, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+def show_login_page():
+    inject_css()
+    svg = APP_SVG_LOGO.format(color=APP_PRIMARY)
+    st.markdown("<div class='logo-top'>", unsafe_allow_html=True)
+    st.markdown(svg, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='small-muted'>Sign in or create an account to continue</div>", unsafe_allow_html=True)
+
+    username = st.text_input("Username", key="login_user", placeholder="username")
+    password = st.text_input("Password", type="password", key="login_pass", placeholder="password")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Login", key="btn_login"):
+            token = call_auth_login(username, password)
+            if token:
+                info = verify_token(token)
+                if info and info.get("username") == username:
+                    st.session_state["access_token"] = token
+                    st.session_state["username"] = username
+                    st.session_state["places"] = load_user_places(username)
+                    st.success("Logged in")
+                else:
+                    st.error("Login succeeded but token verification failed.")
+            else:
+                st.error("Login failed. Check credentials or auth server.")
+    with col2:
+        if st.button("Sign up", key="btn_signup"):
+            token = call_auth_signup(username, password)
+            if token:
+                info = verify_token(token)
+                if info and info.get("username") == username:
+                    st.session_state["access_token"] = token
+                    st.session_state["username"] = username
+                    st.session_state["places"] = load_user_places(username)
+                    st.success("Account created and logged in")
+                else:
+                    st.error("Sign up succeeded but token verification failed.")
+            else:
+                st.error("Sign up failed (username may already exist).")
+
+# -------------------------
+# Explore backend helper (safe)
+# -------------------------
+def fetch_explore_from_backend(city: str, category: str):
+    try:
+        resp = requests.get(f"{BASE_URL}/explore", params={"city": city, "category": category}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", []) if isinstance(data, dict) else []
+        normalized = []
+        for r in results:
+            lat = r.get("latitude") or r.get("lat") or None
+            lon = r.get("longitude") or r.get("lon") or None
+            if lat is None or lon is None:
+                link = r.get("url") or r.get("link") or r.get("maps_link") or r.get("map_url") or ""
+                lat, lon = parse_map_link(link)
+            if lat is not None and lon is not None:
+                r["latitude"] = float(lat)
+                r["longitude"] = float(lon)
+                normalized.append(r)
+        return normalized
+    except Exception:
+        st.error("Explore fetch failed: backend unreachable or returned unexpected data.")
+        return []
+
+# -------------------------
+# Main application UI
+# -------------------------
 def main_app():
     inject_css()
     top_logo()
 
-    # Main layout: tabs and panels
-    tabs = st.tabs(["Dashboard", "Explore", "Add Place", "Favorites", "Categories", "Settings"])
+    # Top controls
+    cols = st.columns([3, 1])
+    with cols[0]:
+        st.markdown(f"<h2 style='margin:0;color:#e6e6e6'>CityScout</h2>", unsafe_allow_html=True)
+    with cols[1]:
+        if st.button("Logout"):
+            logout_user()
+            st.experimental_rerun()
 
-    # Dashboard: summary and quick actions
+    tabs = st.tabs(["Dashboard", "Explore", "Add Place", "Places", "Categories", "Settings"])
+
+    # Dashboard
     with tabs[0]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Dashboard</h3></div>", unsafe_allow_html=True)
         total = len(st.session_state["places"])
         favs = sum(1 for p in st.session_state["places"] if p.get("favorite"))
         st.markdown(f"**Total places:** {total}  •  **Favorites:** {favs}")
         st.write("---")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("Add sample place (center)"):
-                # add a sample place at Kampala center
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("Add sample place"):
                 add_place("Sample Place", 0.3476, 32.5825, "Sample", category="Attractions", favorite=False)
                 st.success("Sample place added")
-        with col2:
-            if st.button("Open Favorites Map (full)"):
-                st.session_state["_open_full_favs"] = True
-        with col3:
+        with c2:
+            if st.button("Export places (CSV)"):
+                df = pd.DataFrame(st.session_state["places"])
+                csv = df.to_csv(index=False).encode("utf-8")
+                st.download_button("Download CSV", data=csv, file_name="places.csv", mime="text/csv")
+        with c3:
             if st.button("Clear all places"):
                 st.session_state["places"] = []
+                if st.session_state.get("username"):
+                    save_user_places(st.session_state["username"], st.session_state["places"])
                 st.success("All places cleared")
 
-    # Explore tab
+    # Explore
     with tabs[1]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Explore</h3></div>", unsafe_allow_html=True)
         city = st.text_input("City (optional)", key="explore_city")
@@ -438,12 +504,12 @@ def main_app():
                         st.write(desc)
                     if lat and lon:
                         st.write(f"📍 {lat:.6f}, {lon:.6f}")
-                        if st.button(f"Add {name} to places", key=f"add_explore_{hash(name)}"):
-                            add_place(name, lat, lon, desc, category=r.get("category","Other"), favorite=False, source_link=r.get("url",""))
+                        if st.button(f"Add {name} to my places", key=f"add_explore_{hash(name)}"):
+                            add_place(name, lat, lon, desc, category=r.get("category", "Other"), favorite=False, source_link=r.get("url", ""))
                             st.success(f"Added {name}")
                     st.write("---")
 
-    # Add Place tab
+    # Add Place
     with tabs[2]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Add Place</h3></div>", unsafe_allow_html=True)
         st.write("Paste a map link (Google, Apple, PetalMaps, Bing, OpenStreetMap) or click on the interactive map below.")
@@ -470,12 +536,12 @@ def main_app():
                     st.markdown(f"- [Open in OpenStreetMap]({osm_link(lat_f, lon_f)})")
 
         st.markdown("**Interactive map** — click to pick coordinates.")
-        # center map
         if st.session_state["places"]:
             center = st.session_state["places"][-1]
             center_lat, center_lon = center.get("latitude", 0), center.get("longitude", 0)
         else:
-            center_lat, center_lon = 0.3476, 32.5825
+            center_lat, center_lon = 0.3476, 32.5825  # Kampala default
+
         m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
         folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(m)
         folium.TileLayer('Stamen Terrain', attr='Map tiles by Stamen Design, CC BY 3.0 — Map data © OpenStreetMap contributors').add_to(m)
@@ -487,6 +553,7 @@ def main_app():
             control=True
         ).add_to(m)
         folium.LayerControl().add_to(m)
+
         map_result = st_folium(m, width=900, height=450)
         last_click = map_result.get("last_clicked")
         if last_click:
@@ -502,18 +569,13 @@ def main_app():
                     st.success("Place added from map click")
                     st.markdown(f"- [Open in Apple Maps]({apple_maps_link(p['latitude'], p['longitude'])})")
 
-    # Favorites tab
+    # Places (list, edit, delete, map preview)
     with tabs[3]:
-        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Places & Favorites</h3></div>", unsafe_allow_html=True)
-        # Filters
-        colf1, colf2 = st.columns([2,1])
-        with colf1:
-            search = st.text_input("Search places by name or description", key="search_places")
-        with colf2:
-            cat_filter = st.selectbox("Filter category", ["All"] + st.session_state["categories"], index=0)
+        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Places</h3></div>", unsafe_allow_html=True)
+        search = st.text_input("Search places by name or description", key="search_places")
+        cat_filter = st.selectbox("Filter category", ["All"] + st.session_state["categories"], index=0)
         fav_only = st.checkbox("Show favorites only", value=False)
 
-        # Build list
         items = st.session_state["places"]
         if search:
             items = [p for p in items if search.lower() in (p.get("name","").lower() + p.get("description","").lower())]
@@ -525,7 +587,6 @@ def main_app():
         if not items:
             st.info("No places match the filters.")
         else:
-            # Map preview and list
             first = items[0]
             preview_map = folium.Map(location=[first["latitude"], first["longitude"]], zoom_start=12)
             marker_cluster = MarkerCluster().add_to(preview_map)
@@ -543,9 +604,7 @@ def main_app():
                     st.write(p.get("description"))
                 lat, lon = p.get("latitude"), p.get("longitude")
                 st.write(f"📍 {lat:.6f}, {lon:.6f}")
-                # external links (Apple first)
-                st.markdown(f"[Open in Apple Maps]({apple_maps_link(lat, lon)})  |  [Google]({google_maps_link(lat, lon)})  |  [PetalMaps]({petal_maps_link(lat, lon)})  |  [Bing]({bing_maps_link(lat, lon)})  |  [OSM]({osm_link(lat, lon)})", unsafe_allow_html=True)
-                # actions
+                st.markdown(f"[Apple Maps]({apple_maps_link(lat, lon)})  |  [Google]({google_maps_link(lat, lon)})  |  [PetalMaps]({petal_maps_link(lat, lon)})  |  [Bing]({bing_maps_link(lat, lon)})  |  [OSM]({osm_link(lat, lon)})", unsafe_allow_html=True)
                 ca, cb, cc = st.columns([1,1,1])
                 with ca:
                     if st.button("Edit", key=f"edit_{p['id']}"):
@@ -569,10 +628,10 @@ def main_app():
                         st.success("Updated favorite status")
                 st.write("---")
 
-    # Categories tab: manage categories
+    # Categories
     with tabs[4]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Categories</h3></div>", unsafe_allow_html=True)
-        st.write("Create, rename, or delete categories. Deleting a category moves places to 'Other'.")
+        st.write("Create, rename, or delete categories. Deleting moves places to 'Other'.")
         col1, col2 = st.columns([2,1])
         with col1:
             new_cat = st.text_input("New category name", key="new_cat")
@@ -587,31 +646,43 @@ def main_app():
             if st.button("Delete selected category"):
                 if sel in st.session_state["categories"]:
                     st.session_state["categories"].remove(sel)
-                    # move places to Other
                     for p in st.session_state["places"]:
                         if p.get("category") == sel:
                             p["category"] = "Other"
+                    if st.session_state.get("username"):
+                        save_user_places(st.session_state["username"], st.session_state["places"])
                     st.success("Category deleted and places moved to Other")
-
         st.write("Current categories:")
         st.write(", ".join(st.session_state["categories"]))
 
-    # Settings tab: minimal (logout)
+    # Settings
     with tabs[5]:
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Settings</h3></div>", unsafe_allow_html=True)
         st.write(f"Logged in as: **{st.session_state.get('username') or 'guest'}**")
         if st.button("Logout (end session)"):
-            st.session_state["logged_in"] = False
-            st.session_state["username"] = None
+            logout_user()
             st.experimental_rerun()
 
 # -------------------------
 # App entry
 # -------------------------
 def run():
-    if not st.session_state["logged_in"]:
-        show_logo_only_login()
+    # If token exists, verify and load user places
+    token = st.session_state.get("access_token")
+    username = st.session_state.get("username")
+    if token and username:
+        info = verify_token(token)
+        if not info or info.get("username") != username:
+            logout_user()
+
+    if not st.session_state.get("username"):
+        show_login_page()
         return
+
+    # ensure user's places loaded
+    if st.session_state.get("username") and not st.session_state.get("places"):
+        st.session_state["places"] = load_user_places(st.session_state["username"])
+
     main_app()
 
 if __name__ == "__main__":
