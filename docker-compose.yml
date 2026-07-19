@@ -1,31 +1,31 @@
 version: "3.9"
-
 services:
-  backend:
-    build:
-      context: ./backend   # adjust if your backend folder is named differently
-    command: npm run dev
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
-    working_dir: /app
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
   frontend:
-    build:
-      context: .           # assumes Dockerfile for Streamlit is in project root
-    command: streamlit run streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+    build: .
     ports:
       - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - USE_FILE_CACHE=false
+      - CACHE_DIR=/data/cache
+      - OSRM_ROUTE_TTL=3600
+      - PAIRWISE_TTL=3600
     volumes:
-      - .:/app
-    working_dir: /app
+      - ./data/cache:/data/cache
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
+
+  backend:
+    image: your-backend-image
+    ports:
+      - "8000:8000"
+
+  # Optional Redis service for a production-grade cache (requires code changes to use Redis)
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
