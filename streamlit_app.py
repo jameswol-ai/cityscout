@@ -1,18 +1,7 @@
 # streamlit_app.py
 """
-CityScout - Streamlit app with public share hosting and reverted logo
-
-Changes in this version:
-- Adds simple public share hosting support (local token files + optional password protection)
-  - Generates share tokens and saves them as JSON files in USER_DATA_DIR
-  - If PUBLIC_BASE_URL env var is set, the app will display a public URL for the token
-  - Password protection supported (stored as SHA256 hash)
-  - Loading a share token requires the password if one was set
-- Reverted to the older compact SVG logo (single image asset)
-- Keeps previously implemented features: sidebar navigation, Trip Planner, per-user persistence,
-  photos, reviews, tags, proximity search, GPX export, templates, OSRM routing, explore fallback
-- Uses local file-based share hosting; for true public hosting you must serve USER_DATA_DIR/share_*.json
-  from a public endpoint (see PUBLIC_BASE_URL env var)
+CityScout - Streamlit app with Trip Budget & Expense Calculator,
+public share hosting, and reverted logo.
 """
 
 from __future__ import annotations
@@ -40,8 +29,6 @@ AUTH_VERIFY_TIMEOUT = int(os.getenv("AUTH_VERIFY_TIMEOUT", "6"))
 USER_DATA_DIR = os.getenv("USER_DATA_DIR", "./user_data")
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-# PUBLIC_BASE_URL: if set, used to build public share URLs:
-# e.g., https://cityscout.example.com/share/<token>.json
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 MEDIA_DIR_NAME = "media"
 BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
@@ -74,7 +61,7 @@ if "last_route" not in st.session_state:
 if "trip_templates" not in st.session_state:
     st.session_state["trip_templates"] = {}
 if "share_tokens" not in st.session_state:
-    st.session_state["share_tokens"] = {}  # token -> metadata
+    st.session_state["share_tokens"] = {}
 
 USERS_FILE = os.path.join(USER_DATA_DIR, "users.json")
 
@@ -371,11 +358,11 @@ def logout_user():
     st.session_state["last_route"] = None
 
 # -------------------------
-# Place helpers (photos, tags, reviews)
+# Place helpers (photos, tags, reviews, cost tier)
 # -------------------------
 def add_place(name: str, lat: float, lon: float, description: str = "", category: str = "Other",
               favorite: bool = False, source_link: str = "", tags: List[str] = None,
-              photos: List[str] = None):
+              photos: List[str] = None, cost_tier: str = "$$"):
     address = reverse_geocode(lat, lon)
     place = {
         "id": hashlib.sha1(f"{name}{lat}{lon}{time.time()}".encode()).hexdigest()[:12],
@@ -390,6 +377,7 @@ def add_place(name: str, lat: float, lon: float, description: str = "", category
         "tags": tags or [],
         "photos": photos or [],
         "reviews": [],
+        "cost_tier": cost_tier or "$$",
     }
     st.session_state["places"].append(place)
     if st.session_state.get("username"):
@@ -437,6 +425,32 @@ def average_rating(place: dict) -> Optional[float]:
     return sum(r.get("rating", 0) for r in reviews) / len(reviews)
 
 # -------------------------
+# Expense mapping helper
+# -------------------------
+COST_TIER_ESTIMATES = {
+    "$": 10.0,
+    "$$": 35.0,
+    "$$$": 80.0,
+    "$$$$": 180.0
+}
+
+MODE_COST_PER_KM = {
+    "driving": 0.35,  # fuel/wear
+    "cycling": 0.0,
+    "walking": 0.0
+}
+
+def estimate_trip_costs(ordered_places: List[dict], total_km: float, mode: str) -> dict:
+    activity_cost = sum(COST_TIER_ESTIMATES.get(p.get("cost_tier", "$$"), 35.0) for p in ordered_places)
+    travel_cost = total_km * MODE_COST_PER_KM.get(mode, 0.35)
+    total_cost = activity_cost + travel_cost
+    return {
+        "activity_cost": activity_cost,
+        "travel_cost": travel_cost,
+        "total_cost": total_cost
+    }
+
+# -------------------------
 # Proximity helper (Haversine)
 # -------------------------
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -479,9 +493,6 @@ def fetch_explore_from_backend(city: str, category: str):
             params["category"] = category
         resp = requests.get(f"{BASE_URL}/explore", params=params, timeout=8)
         if resp.status_code < 200 or resp.status_code >= 300:
-            st.warning(f"Explore backend returned status {resp.status_code}. Using sample results.")
-            snippet = resp.text[:400].replace("\n", " ")
-            st.caption(f"Backend response snippet: {snippet}")
             return sample
         data = resp.json()
         if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
@@ -489,8 +500,6 @@ def fetch_explore_from_backend(city: str, category: str):
         elif isinstance(data, list):
             results = data
         else:
-            st.warning("Explore backend returned unexpected JSON structure. Using sample results.")
-            st.caption(f"Response type: {type(data)}")
             return sample
 
         normalized = []
@@ -508,12 +517,9 @@ def fetch_explore_from_backend(city: str, category: str):
                 except Exception:
                     continue
         if not normalized:
-            st.info("Explore backend returned no usable coordinates. Showing sample results.")
             return sample
         return normalized
-
     except Exception:
-        st.warning("Explore fetch failed; using sample results.")
         return sample
 
 # -------------------------
@@ -596,12 +602,6 @@ def _share_path(token: str) -> str:
     return os.path.join(USER_DATA_DIR, f"share_{token}.json")
 
 def create_share_token(payload: dict, password: Optional[str] = None, expires_hours: Optional[int] = None) -> str:
-    """
-    Create a share token file. Returns token string.
-    - payload: arbitrary JSON-serializable data (e.g., last_route or list of places)
-    - password: optional plaintext password; stored as SHA256 hash
-    - expires_hours: optional TTL in hours
-    """
     token = hashlib.sha1(json.dumps(payload, default=str).encode()).hexdigest()[:12]
     meta = {
         "payload": payload,
@@ -612,7 +612,6 @@ def create_share_token(payload: dict, password: Optional[str] = None, expires_ho
     path = _share_path(token)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    # store in session for quick access
     st.session_state["share_tokens"][token] = meta
     return token
 
@@ -623,7 +622,6 @@ def load_share_token(token: str, password: Optional[str] = None) -> Optional[dic
     try:
         with open(path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        # check expiry
         if meta.get("expires_at") and time.time() > meta["expires_at"]:
             return None
         ph = meta.get("password_hash")
@@ -642,7 +640,7 @@ def public_share_url(token: str) -> Optional[str]:
     return None
 
 # -------------------------
-# Sidebar navigation (tabs in sidebar)
+# Sidebar navigation
 # -------------------------
 def sidebar_navigation():
     inject_css()
@@ -655,7 +653,7 @@ def sidebar_navigation():
     st.session_state["page"] = choice
     st.sidebar.markdown("---")
     if st.sidebar.button("Add sample place"):
-        add_place("Sample Place", 0.3476, 32.5825, "Sample", category="Attractions", favorite=False)
+        add_place("Sample Place", 0.3476, 32.5825, "Sample", category="Attractions", favorite=False, cost_tier="$$")
         st.sidebar.success("Sample place added")
     if st.sidebar.button("Export all places (CSV)"):
         df = pd.DataFrame(st.session_state["places"])
@@ -670,15 +668,13 @@ def sidebar_navigation():
             st.rerun()
 
 # -------------------------
-# Page renderers (Share page + others)
+# Page renderers
 # -------------------------
 def page_share():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Share</h3></div>", unsafe_allow_html=True)
-    st.write("Create a public share token for a trip or a list of places. Tokens are stored as files in the app instance.")
-    st.write("If PUBLIC_BASE_URL is configured and you serve USER_DATA_DIR publicly at that base URL, the share will be accessible via the public URL.")
+    st.write("Create a public share token for a trip or a list of places.")
     st.write("---")
 
-    # Choose payload: last route or selected places
     choice = st.selectbox("Share payload", ["Last computed route", "Selected saved places"])
     if choice == "Selected saved places":
         if not st.session_state.get("places"):
@@ -704,52 +700,25 @@ def page_share():
         st.success("Share token created")
         st.write(f"Token: **{token}**")
         if url:
-            st.markdown(f"Public URL (if you serve share files at PUBLIC_BASE_URL): {url}")
-        else:
-            st.info("PUBLIC_BASE_URL not configured. To make the share publicly accessible, set PUBLIC_BASE_URL to the base URL where share files will be served and ensure the files in USER_DATA_DIR are reachable there.")
-        st.write("You can load this token on any instance of this app (Settings → Load shared token).")
-
-    st.write("---")
-    st.markdown("**Existing local share tokens**")
-    files = [f for f in os.listdir(USER_DATA_DIR) if f.startswith("share_") and f.endswith(".json")]
-    if not files:
-        st.write("No local share tokens found.")
-    else:
-        for fn in sorted(files, reverse=True):
-            token = fn.replace("share_", "").replace(".json", "")
-            meta = None
-            try:
-                with open(os.path.join(USER_DATA_DIR, fn), "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except Exception:
-                continue
-            created = meta.get("created_at")
-            expires_at = meta.get("expires_at")
-            expires_str = datetime.utcfromtimestamp(expires_at).isoformat() if expires_at else "never"
-            st.markdown(f"- **{token}** — created {created} — expires {expires_str}")
-            url = public_share_url(token)
-            if url:
-                st.markdown(f"  - Public URL: {url}")
-            if st.button(f"Delete token {token}", key=f"delshare_{token}"):
-                try:
-                    os.remove(os.path.join(USER_DATA_DIR, fn))
-                    st.success("Deleted")
-                except Exception:
-                    st.error("Failed to delete token")
+            st.markdown(f"Public URL: {url}")
 
 def page_trip_planner():
-    st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Trip Planner</h3></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Trip Planner & Budget Calculator</h3></div>", unsafe_allow_html=True)
     if st.session_state.get("last_route"):
         lr = st.session_state["last_route"]
         st.markdown("**Last computed route**")
         st.write(f"- Stops: {len(lr.get('ordered_places', []))}")
         st.write(f"- Distance: {lr.get('total_km', 0):.2f} km")
         st.write(f"- Duration: {lr.get('total_min', 0):.1f} min")
+        
+        costs = estimate_trip_costs(lr.get('ordered_places', []), lr.get('total_km', 0), lr.get('mode', 'driving'))
+        st.markdown(f"**Estimated Trip Expenses:** 💵 ${costs['total_cost']:.2f} total *(Activities: ${costs['activity_cost']:.2f} | Travel: ${costs['travel_cost']:.2f})*")
+
         if lr.get("coords"):
             route_map = folium.Map(location=lr["coords"][len(lr["coords"])//2], zoom_start=12)
             folium.PolyLine(lr["coords"], color=APP_PRIMARY, weight=5, opacity=0.85).add_to(route_map)
             for i, p in enumerate(lr["ordered_places"]):
-                folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']}").add_to(route_map)
+                folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']} ({p.get('cost_tier','$$')})").add_to(route_map)
             folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
             st_folium(route_map, width=900, height=350)
         st.write("---")
@@ -758,48 +727,20 @@ def page_trip_planner():
         st.info("No saved places yet. Add places first.")
         return
 
-    place_names = [f"{p['name']} — {p.get('category','')}" for p in st.session_state["places"]]
+    place_names = [f"{p['name']} ({p.get('cost_tier','$$')}) — {p.get('category','')}" for p in st.session_state["places"]]
     selected_indices = st.multiselect("Select places to include (2+)", options=list(range(len(place_names))), format_func=lambda i: place_names[i])
     if len(selected_indices) < 2:
         st.write("Select at least two places to plan a route.")
         return
-
-    templates = st.session_state.get("trip_templates", {})
-    template_names = list(templates.keys())
-    col_t1, col_t2 = st.columns([2,1])
-    with col_t1:
-        if template_names:
-            chosen_template = st.selectbox("Load template", ["(none)"] + template_names)
-        else:
-            chosen_template = "(none)"
-    with col_t2:
-        new_template_name = st.text_input("Save as template (name)", key="new_template_name")
-        if st.button("Save template"):
-            if new_template_name:
-                templates[new_template_name] = {"indices": selected_indices, "created_at": datetime.utcnow().isoformat()}
-                st.session_state["trip_templates"] = templates
-                if st.session_state.get("username"):
-                    path = os.path.join(USER_DATA_DIR, f"{st.session_state['username']}_templates.json")
-                    with open(path, "w", encoding="utf-8") as f:
-                        json.dump(templates, f, indent=2)
-                st.success("Template saved")
-            else:
-                st.error("Provide a template name")
-
-    if chosen_template and chosen_template != "(none)":
-        templ = templates.get(chosen_template)
-        if templ:
-            selected_indices = templ.get("indices", selected_indices)
-            st.info(f"Loaded template '{chosen_template}'")
 
     start_choice = st.selectbox("Start from", options=selected_indices, format_func=lambda i: place_names[i])
     mode_choice = st.selectbox("Mode", ["driving", "walking", "cycling"], index=0)
     round_trip = st.checkbox("Round trip (return to start)", value=False)
     visit_duration = st.number_input("Visit duration per stop (minutes)", min_value=0, value=0, step=5)
 
-    if st.button("Compute optimized route"):
+    if st.button("Compute optimized route & budget"):
         subset = [st.session_state["places"][i] for i in selected_indices]
-        with st.spinner("Computing pairwise distances..."):
+        with st.spinner("Computing pairwise distances & estimating budget..."):
             dist_matrix, dur_matrix = compute_distance_matrix(subset, mode=mode_choice)
         start_idx_in_subset = selected_indices.index(start_choice)
         order = nearest_neighbor_order(dist_matrix, start_index=start_idx_in_subset)
@@ -810,44 +751,45 @@ def page_trip_planner():
         ordered_places = [subset[i] for i in order]
         coords, total_km, total_min = build_route_polyline_coords(order, subset, mode=mode_choice)
         total_min += visit_duration * max(0, len(ordered_places) - (1 if round_trip else 0))
+        
+        costs = estimate_trip_costs(ordered_places, total_km, mode_choice)
+
         st.session_state["last_route"] = {
             "ordered_places": ordered_places,
             "coords": coords,
             "total_km": total_km,
             "total_min": total_min,
             "mode": mode_choice,
+            "costs": costs,
             "computed_at": datetime.utcnow().isoformat()
         }
-        st.success(f"Route computed — {len(ordered_places)} stops, {total_km:.2f} km, {total_min:.1f} min (approx)")
-        st.markdown("**Ordered stops**")
+        st.success(f"Route computed — {len(ordered_places)} stops, {total_km:.2f} km, {total_min:.1f} min")
+        st.info(f"💵 **Estimated Budget:** ${costs['total_cost']:.2f} (Activities: ${costs['activity_cost']:.2f} | Transit: ${costs['travel_cost']:.2f})")
+        
+        st.markdown("**Ordered stops & Cost Breakdown**")
         for idx, p in enumerate(ordered_places, start=1):
-            st.markdown(f"{idx}. **{p['name']}** — {p.get('category','')}")
+            st.markdown(f"{idx}. **{p['name']}** — {p.get('category','')} | Cost Tier: `{p.get('cost_tier','$$')}`")
             if p.get("address"):
                 st.caption(p.get("address"))
-            st.markdown(f"- Apple: {apple_maps_link(p['latitude'], p['longitude'])}  |  Google: {google_maps_link(p['latitude'], p['longitude'])}", unsafe_allow_html=True)
         if coords:
             route_map = folium.Map(location=coords[len(coords)//2], zoom_start=12)
             folium.PolyLine(coords, color=APP_PRIMARY, weight=5, opacity=0.85).add_to(route_map)
             for i, p in enumerate(ordered_places):
-                folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']}", popup=p.get('description','')).add_to(route_map)
+                folium.Marker([p['latitude'], p['longitude']], tooltip=f"{i+1}. {p['name']}").add_to(route_map)
             folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(route_map)
-            folium.LayerControl().add_to(route_map)
             st_folium(route_map, width=900, height=500)
         if coords:
             gpx_bytes = export_gpx(coords, name=f"trip_{int(time.time())}")
             st.download_button("Export route (GPX)", data=gpx_bytes, file_name="trip_route.gpx", mime="application/gpx+xml")
-        df_ordered = pd.DataFrame(ordered_places)
-        csv = df_ordered.to_csv(index=False).encode("utf-8")
-        st.download_button("Export ordered stops (CSV)", data=csv, file_name="trip_order.csv", mime="text/csv")
 
 def page_add_place():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Add Place</h3></div>", unsafe_allow_html=True)
-    st.write("Paste a map link or click on the interactive map below. You can upload photos and add tags.")
     with st.form("add_place_form"):
         name = st.text_input("Place name", "")
         map_link = st.text_input("Map link (paste here)", "")
         description = st.text_area("Short description (optional)", "")
         category = st.selectbox("Category", st.session_state["categories"] + ["Other"])
+        cost_tier = st.selectbox("Cost Tier", ["$", "$$", "$$$", "$$$$"], index=1, help="Expected price level for expenses estimation")
         favorite_flag = st.checkbox("Mark as favorite", value=False)
         tags_input = st.text_input("Tags (comma separated)", "")
         uploaded_files = st.file_uploader("Upload photos (optional)", accept_multiple_files=True, type=["png","jpg","jpeg"], key="upload_photos")
@@ -857,7 +799,7 @@ def page_add_place():
             if map_link:
                 lat_f, lon_f = parse_map_link(map_link)
             if lat_f is None or lon_f is None:
-                st.error("Could not extract coordinates from the link. Try a different link or click on the map below.")
+                st.error("Could not extract coordinates from the link. Click on the map below instead.")
             else:
                 tags = [t.strip() for t in tags_input.split(",") if t.strip()]
                 photos_saved = []
@@ -869,13 +811,8 @@ def page_add_place():
                         with open(path, "wb") as f:
                             f.write(up.getbuffer())
                         photos_saved.append(fname)
-                p = add_place(name or f"Place {len(st.session_state['places'])+1}", lat_f, lon_f, description, category, favorite_flag, source_link=map_link, tags=tags, photos=photos_saved)
-                st.success("Place added")
-                st.markdown(f"- [Open in Apple Maps]({apple_maps_link(lat_f, lon_f)})")
-                st.markdown(f"- [Open in Google Maps]({google_maps_link(lat_f, lon_f)})")
-                st.markdown(f"- [Open in PetalMaps]({petal_maps_link(lat_f, lon_f)})")
-                st.markdown(f"- [Open in Bing]({bing_maps_link(lat_f, lon_f)})")
-                st.markdown(f"- [Open in OpenStreetMap]({osm_link(lat_f, lon_f)})")
+                add_place(name or f"Place {len(st.session_state['places'])+1}", lat_f, lon_f, description, category, favorite_flag, source_link=map_link, tags=tags, photos=photos_saved, cost_tier=cost_tier)
+                st.success("Place added successfully")
 
     st.markdown("**Interactive map** — click to pick coordinates.")
     if st.session_state["places"]:
@@ -886,71 +823,33 @@ def page_add_place():
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
     folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(m)
-    folium.LayerControl().add_to(m)
     map_result = st_folium(m, width=900, height=450)
     last_click = map_result.get("last_clicked")
     if last_click:
-        addr = reverse_geocode(last_click["lat"], last_click["lng"])
-        st.info(f"Map clicked at: {last_click['lat']:.6f}, {last_click['lng']:.6f}")
-        if addr:
-            st.caption(f"Address: {addr}")
         with st.form("add_from_click_form"):
             place_name = st.text_input("Name for clicked place", value=f"Place {len(st.session_state['places'])+1}", key="name_click")
             place_desc = st.text_area("Description (optional)", key="desc_click")
             place_cat = st.selectbox("Category", st.session_state["categories"] + ["Other"], key="cat_click")
+            place_cost = st.selectbox("Cost Tier", ["$", "$$", "$$$", "$$$$"], index=1, key="cost_click")
             fav_flag = st.checkbox("Mark as favorite", value=False, key="fav_click")
             tags_input2 = st.text_input("Tags (comma separated)", key="tags_click")
-            uploaded_files2 = st.file_uploader("Upload photos (optional)", accept_multiple_files=True, type=["png","jpg","jpeg"], key="upload_photos_click")
             add_clicked = st.form_submit_button("Add place at clicked location")
             if add_clicked:
                 tags = [t.strip() for t in tags_input2.split(",") if t.strip()]
-                photos_saved = []
-                if uploaded_files2 and st.session_state.get("username"):
-                    media_dir = user_media_dir(st.session_state["username"])
-                    for up in uploaded_files2:
-                        fname = f"{int(time.time())}_{up.name}"
-                        path = os.path.join(media_dir, fname)
-                        with open(path, "wb") as f:
-                            f.write(up.getbuffer())
-                        photos_saved.append(fname)
-                p = add_place(place_name or f"Place {len(st.session_state['places'])+1}", last_click["lat"], last_click["lng"], place_desc, place_cat, fav_flag, source_link="", tags=tags, photos=photos_saved)
+                add_place(place_name, last_click["lat"], last_click["lng"], place_desc, place_cat, fav_flag, tags=tags, cost_tier=place_cost)
                 st.success("Place added from map click")
-                st.markdown(f"- [Open in Apple Maps]({apple_maps_link(p['latitude'], p['longitude'])})")
 
 def page_places():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Places</h3></div>", unsafe_allow_html=True)
     search = st.text_input("Search places by name or description", key="search_places")
     cat_filter = st.selectbox("Filter category", ["All"] + st.session_state["categories"], index=0)
-    tag_filter = st.text_input("Filter by tag (single)", key="tag_filter")
     fav_only = st.checkbox("Show favorites only", value=False)
-    proximity_section = st.expander("Find nearby (proximity search)")
-    with proximity_section:
-        lat_q = st.number_input("Latitude", value=0.0, format="%.6f", key="prox_lat")
-        lon_q = st.number_input("Longitude", value=0.0, format="%.6f", key="prox_lon")
-        radius_km = st.number_input("Radius (km)", min_value=0.1, value=5.0, step=0.1, key="prox_radius")
-        if st.button("Find nearby"):
-            nearby = []
-            for p in st.session_state["places"]:
-                d = haversine_km(lat_q, lon_q, p["latitude"], p["longitude"])
-                if d <= radius_km:
-                    nearby.append((p, d))
-            if not nearby:
-                st.info("No saved places within radius.")
-            else:
-                st.success(f"Found {len(nearby)} places within {radius_km} km")
-                nearby_sorted = sorted(nearby, key=lambda x: x[1])
-                for p, d in nearby_sorted:
-                    st.markdown(f"**{p['name']}** — {d:.2f} km")
-                    if p.get("address"):
-                        st.caption(p.get("address"))
 
     items = st.session_state["places"]
     if search:
         items = [p for p in items if search.lower() in (p.get("name","").lower() + p.get("description","").lower())]
     if cat_filter != "All":
         items = [p for p in items if p.get("category") == cat_filter]
-    if tag_filter:
-        items = [p for p in items if tag_filter in p.get("tags", [])]
     if fav_only:
         items = [p for p in items if p.get("favorite")]
 
@@ -958,152 +857,58 @@ def page_places():
         st.info("No places match the filters.")
         return
 
-    first = items[0]
-    preview_map = folium.Map(location=[first["latitude"], first["longitude"]], zoom_start=12)
-    marker_cluster = MarkerCluster().add_to(preview_map)
     for p in items:
-        folium.Marker([p["latitude"], p["longitude"]], popup=f"{p['name']} ({p['category']})").add_to(marker_cluster)
-    folium.TileLayer('CartoDB positron', attr='© CartoDB').add_to(preview_map)
-    folium.LayerControl().add_to(preview_map)
-    st.subheader("Map preview")
-    st_folium(preview_map, width=900, height=400)
-
-    st.write("---")
-    for p in items:
-        st.markdown(f"**{p['name']}**  —  *{p.get('category','Other')}*")
+        st.markdown(f"**{p['name']}**  —  *{p.get('category','Other')}* | Cost: `{p.get('cost_tier','$$')}`")
         if p.get("address"):
             st.caption(p.get("address"))
         if p.get("description"):
             st.write(p.get("description"))
         lat, lon = p.get("latitude"), p.get("longitude")
         st.write(f"📍 {lat:.6f}, {lon:.6f}")
-        if p.get("photos"):
-            media_dir = user_media_dir(st.session_state.get("username") or "public")
-            cols = st.columns(len(p["photos"]))
-            for i, fn in enumerate(p["photos"]):
-                path = os.path.join(media_dir, fn)
-                try:
-                    cols[i].image(path, width=160)
-                except Exception:
-                    cols[i].write("Image not found")
-        avg = average_rating(p)
-        if avg:
-            st.markdown(f"**Rating:** {avg:.1f} / 5 ({len(p.get('reviews',[]))} reviews)")
-        else:
-            st.markdown("**Rating:** —")
-        st.markdown(f"[Apple Maps]({apple_maps_link(lat, lon)})  |  [Google]({google_maps_link(lat, lon)})  |  [OSM]({osm_link(lat, lon)})", unsafe_allow_html=True)
-        ca, cb, cc = st.columns([1,1,1])
+        ca, cb = st.columns([1,1])
         with ca:
-            if st.button("Edit", key=f"edit_{p['id']}"):
-                with st.form(f"edit_form_{p['id']}"):
-                    new_name = st.text_input("Name", value=p.get("name",""))
-                    new_desc = st.text_area("Description", value=p.get("description",""))
-                    new_cat = st.selectbox("Category", st.session_state["categories"] + ["Other"], index=(st.session_state["categories"] + ["Other"]).index(p.get("category","Other")))
-                    new_tags = st.text_input("Tags (comma separated)", value=",".join(p.get("tags", [])))
-                    new_fav = st.checkbox("Favorite", value=bool(p.get("favorite", False)))
-                    save = st.form_submit_button("Save")
-                    if save:
-                        tags = [t.strip() for t in new_tags.split(",") if t.strip()]
-                        update_place(p["id"], name=new_name, description=new_desc, category=new_cat, favorite=new_fav, tags=tags)
-                        st.success("Saved")
-        with cb:
             if st.button("Delete", key=f"del_{p['id']}"):
                 delete_place(p["id"])
                 st.success("Deleted")
-        with cc:
+        with cb:
             fav_label = "Unfavorite" if p.get("favorite") else "Mark Favorite"
             if st.button(fav_label, key=f"fav_{p['id']}"):
                 update_place(p["id"], favorite=not p.get("favorite", False))
                 st.success("Updated favorite status")
-        with st.expander("Add review"):
-            r_user = st.text_input("Your name", value=st.session_state.get("username") or "guest", key=f"rev_user_{p['id']}")
-            r_rating = st.slider("Rating", 1, 5, 5, key=f"rev_rating_{p['id']}")
-            r_text = st.text_area("Review text", key=f"rev_text_{p['id']}")
-            if st.button("Submit review", key=f"rev_submit_{p['id']}"):
-                add_review(p["id"], r_user, r_rating, r_text)
-                st.success("Review added")
-        if p.get("reviews"):
-            st.markdown("**Reviews**")
-            for rev in sorted(p.get("reviews", []), key=lambda x: x.get("ts",""), reverse=True):
-                st.markdown(f"- **{rev.get('user')}** — {rev.get('rating')}/5 — {rev.get('text')}")
         st.write("---")
 
 def page_categories():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Categories</h3></div>", unsafe_allow_html=True)
-    st.write("Create, rename, or delete categories. Deleting moves places to 'Other'.")
-    col1, col2 = st.columns([2,1])
-    with col1:
-        new_cat = st.text_input("New category name", key="new_cat")
-        if st.button("Add category"):
-            if new_cat and new_cat not in st.session_state["categories"]:
-                st.session_state["categories"].append(new_cat)
-                st.success("Category added")
-            else:
-                st.error("Invalid or duplicate category")
-    with col2:
-        sel = st.selectbox("Existing categories", st.session_state["categories"], key="sel_cat")
-        if st.button("Delete selected category"):
-            if sel in st.session_state["categories"]:
-                st.session_state["categories"].remove(sel)
-                for p in st.session_state["places"]:
-                    if p.get("category") == sel:
-                        p["category"] = "Other"
-                if st.session_state.get("username"):
-                    save_user_places(st.session_state["username"], st.session_state["places"])
-                st.success("Category deleted and places moved to Other")
-    st.write("Current categories:")
-    st.write(", ".join(st.session_state["categories"]))
+    new_cat = st.text_input("New category name", key="new_cat")
+    if st.button("Add category"):
+        if new_cat and new_cat not in st.session_state["categories"]:
+            st.session_state["categories"].append(new_cat)
+            st.success("Category added")
+
+def page_dashboard():
+    st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Dashboard</h3></div>", unsafe_allow_html=True)
+    total = len(st.session_state["places"])
+    favs = sum(1 for p in st.session_state["places"] if p.get("favorite"))
+    st.markdown(f"**Total places:** {total}  •  **Favorites:** {favs}")
+
+def page_explore():
+    st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Explore</h3></div>", unsafe_allow_html=True)
+    city = st.text_input("City (optional)", key="explore_city")
+    category = st.selectbox("Category (optional)", ["any", "restaurants", "attractions", "events", "nightlife", "shopping"], key="explore_cat")
+    if st.button("Fetch Explore"):
+        results = fetch_explore_from_backend(city, category)
+        for r in results:
+            st.markdown(f"**{r.get('name')}**")
+            if st.button(f"Add {r.get('name')} to my places", key=f"add_explore_{hash(r.get('name'))}"):
+                add_place(r.get('name'), r.get('latitude', 0), r.get('longitude', 0), r.get('description', ''), category=r.get("category", "Other"), cost_tier="$$")
+                st.success("Added")
 
 def page_settings():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Settings</h3></div>", unsafe_allow_html=True)
     st.write(f"Logged in as: **{st.session_state.get('username') or 'guest'}**")
-    st.write(f"Auth mode: **{st.session_state.get('auth_mode') or 'unknown'}**")
-    st.write("---")
-    st.markdown("**Load shared token** (local instance)")
-    token_in = st.text_input("Share token", key="share_token_input")
-    if st.button("Load share token"):
-        if token_in:
-            payload = load_share_token(token_in)
-            if payload is None:
-                st.error("Token not found or expired.")
-            elif isinstance(payload, dict) and payload.get("requires_password"):
-                pw = st.text_input("Enter share password", type="password", key="share_pw")
-                if st.button("Submit share password"):
-                    payload2 = load_share_token(token_in, password=pw)
-                    if payload2 is None:
-                        st.error("Invalid token or password.")
-                    elif isinstance(payload2, dict) and payload2.get("invalid_password"):
-                        st.error("Invalid password.")
-                    else:
-                        st.success("Share loaded")
-                        st.write(json.dumps(payload2, indent=2))
-            elif isinstance(payload, dict) and payload.get("invalid_password"):
-                st.error("Invalid password.")
-            else:
-                st.success("Share loaded")
-                st.write(json.dumps(payload, indent=2))
-    st.write("---")
     if st.button("Logout (end session)"):
         logout_user()
         st.rerun()
-
-# -------------------------
-# Utility map link generators
-# -------------------------
-def google_maps_link(lat: float, lon: float) -> str:
-    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-
-def apple_maps_link(lat: float, lon: float) -> str:
-    return f"https://maps.apple.com/?q={lat},{lon}"
-
-def petal_maps_link(lat: float, lon: float) -> str:
-    return f"https://map.petalmaps.com/?q={lat},{lon}"
-
-def bing_maps_link(lat: float, lon: float) -> str:
-    return f"https://www.bing.com/maps?cp={lat}~{lon}"
-
-def osm_link(lat: float, lon: float, zoom: int = 16) -> str:
-    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map={zoom}/{lat}/{lon}"
 
 # -------------------------
 # App entry
@@ -1138,101 +943,40 @@ def run():
                         st.session_state["username"] = username
                         st.session_state["auth_mode"] = "remote"
                         st.session_state["places"] = load_user_places(username)
-                        templates_path = os.path.join(USER_DATA_DIR, f"{username}_templates.json")
-                        if os.path.exists(templates_path):
-                            try:
-                                with open(templates_path, "r", encoding="utf-8") as f:
-                                    st.session_state["trip_templates"] = json.load(f)
-                            except Exception:
-                                st.session_state["trip_templates"] = {}
                         st.rerun()
-                    else:
-                        st.error("Login succeeded but token verification failed.")
                 else:
                     if verify_local_user(username, password):
                         st.session_state["access_token"] = None
                         st.session_state["username"] = username
                         st.session_state["auth_mode"] = "local"
                         st.session_state["places"] = load_user_places(username)
-                        templates_path = os.path.join(USER_DATA_DIR, f"{username}_templates.json")
-                        if os.path.exists(templates_path):
-                            try:
-                                with open(templates_path, "r", encoding="utf-8") as f:
-                                    st.session_state["trip_templates"] = json.load(f)
-                            except Exception:
-                                st.session_state["trip_templates"] = {}
                         st.rerun()
                     else:
-                        st.error("Login failed. Check credentials or auth server.")
+                        st.error("Login failed. Check credentials.")
         with col2:
             if st.button("Sign up"):
-                token = call_auth_signup(username, password)
-                if token:
-                    info = verify_token(token)
-                    if info and info.get("username") == username:
-                        st.session_state["access_token"] = token
-                        st.session_state["username"] = username
-                        st.session_state["auth_mode"] = "remote"
-                        st.session_state["places"] = load_user_places(username)
-                        st.rerun()
-                    else:
-                        st.error("Sign up succeeded but token verification failed.")
+                created = create_local_user(username, password)
+                if created:
+                    st.session_state["username"] = username
+                    st.session_state["auth_mode"] = "local"
+                    st.session_state["places"] = []
+                    save_user_places(username, st.session_state["places"])
+                    st.rerun()
                 else:
-                    created = create_local_user(username, password)
-                    if created:
-                        st.session_state["access_token"] = None
-                        st.session_state["username"] = username
-                        st.session_state["auth_mode"] = "local"
-                        st.session_state["places"] = []
-                        save_user_places(username, st.session_state["places"])
-                        st.rerun()
-                    else:
-                        st.error("Sign up failed (username may already exist).")
+                    st.error("Sign up failed (username may already exist).")
         return
 
     if st.session_state.get("username") and not st.session_state.get("places"):
         st.session_state["places"] = load_user_places(st.session_state["username"])
-    if st.session_state.get("username") and not st.session_state.get("trip_templates"):
-        templates_path = os.path.join(USER_DATA_DIR, f"{st.session_state['username']}_templates.json")
-        if os.path.exists(templates_path):
-            try:
-                with open(templates_path, "r", encoding="utf-8") as f:
-                    st.session_state["trip_templates"] = json.load(f)
-            except Exception:
-                st.session_state["trip_templates"] = {}
 
     sidebar_navigation()
     page = st.session_state.get("page", "Trip Planner")
     if page == "Trip Planner":
         page_trip_planner()
     elif page == "Dashboard":
-        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Dashboard</h3></div>", unsafe_allow_html=True)
-        total = len(st.session_state["places"])
-        favs = sum(1 for p in st.session_state["places"] if p.get("favorite"))
-        st.markdown(f"**Total places:** {total}  •  **Favorites:** {favs}")
+        page_dashboard()
     elif page == "Explore":
-        st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Explore</h3></div>", unsafe_allow_html=True)
-        city = st.text_input("City (optional)", key="explore_city")
-        category = st.selectbox("Category (optional)", ["any", "restaurants", "attractions", "events", "nightlife", "shopping"], key="explore_cat")
-        if st.button("Fetch Explore"):
-            results = fetch_explore_from_backend(city, category)
-            if not results:
-                st.info("No results found or backend not available.")
-            else:
-                st.success(f"Found {len(results)} results")
-                for r in results:
-                    name = r.get("name", "Unknown")
-                    desc = r.get("description", "")
-                    lat = r.get("latitude")
-                    lon = r.get("longitude")
-                    st.markdown(f"**{name}**")
-                    if desc:
-                        st.write(desc)
-                    if lat and lon:
-                        st.write(f"📍 {lat:.6f}, {lon:.6f}")
-                        if st.button(f"Add {name} to my places", key=f"add_explore_{hash(name)}"):
-                            add_place(name, lat, lon, desc, category=r.get("category", "Other"), favorite=False, source_link=r.get("url", ""))
-                            st.success(f"Added {name}")
+        page_explore()
     elif page == "Add Place":
         page_add_place()
     elif page == "Places":
