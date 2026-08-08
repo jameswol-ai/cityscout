@@ -32,33 +32,6 @@ from streamlit_folium import st_folium
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
 
-# rbac.py
-import hashlib
-from database import get_db_connection
-
-ROLES = {
-    "viewer": ["read", "review"],
-    "planner": ["read", "review", "create_place", "plan_trip"],
-    "approver": ["read", "review", "create_place", "plan_trip", "approve_itinerary", "manage_categories"],
-    "admin": ["read", "review", "create_place", "plan_trip", "approve_itinerary", "manage_categories", "admin_panel"]
-}
-
-def get_user_role(username: str) -> str:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT role FROM users WHERE username = %s", (username,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row["role"] if row else "viewer"
-
-def check_permission(username: str, action: str) -> bool:
-    role = get_user_role(username)
-    allowed_actions = ROLES.get(role, [])
-    return action in allowed_actions
-
-
-
 # -------------------------
 # Configuration
 # -------------------------
@@ -694,7 +667,7 @@ def sidebar_navigation():
         st.sidebar.markdown(f"**Auth:** {st.session_state.get('auth_mode') or 'unknown'}")
         if st.sidebar.button("Logout"):
             logout_user()
-            st.experimental_rerun()
+            st.rerun()
 
 # -------------------------
 # Page renderers (Share page + others)
@@ -763,10 +736,6 @@ def page_share():
                     st.success("Deleted")
                 except Exception:
                     st.error("Failed to delete token")
-
-# The rest of the page renderers (Trip Planner, Add Place, Places, Categories, Settings)
-# are similar to previous versions. For brevity they are included but unchanged in behavior.
-# (They reuse helpers defined above: add_place, update_place, delete_place, compute_distance_matrix, etc.)
 
 def page_trip_planner():
     st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Trip Planner</h3></div>", unsafe_allow_html=True)
@@ -1116,7 +1085,7 @@ def page_settings():
     st.write("---")
     if st.button("Logout (end session)"):
         logout_user()
-        st.experimental_rerun()
+        st.rerun()
 
 # -------------------------
 # Utility map link generators
@@ -1176,7 +1145,7 @@ def run():
                                     st.session_state["trip_templates"] = json.load(f)
                             except Exception:
                                 st.session_state["trip_templates"] = {}
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Login succeeded but token verification failed.")
                 else:
@@ -1192,7 +1161,7 @@ def run():
                                     st.session_state["trip_templates"] = json.load(f)
                             except Exception:
                                 st.session_state["trip_templates"] = {}
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Login failed. Check credentials or auth server.")
         with col2:
@@ -1205,7 +1174,7 @@ def run():
                         st.session_state["username"] = username
                         st.session_state["auth_mode"] = "remote"
                         st.session_state["places"] = load_user_places(username)
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Sign up succeeded but token verification failed.")
                 else:
@@ -1216,7 +1185,7 @@ def run():
                         st.session_state["auth_mode"] = "local"
                         st.session_state["places"] = []
                         save_user_places(username, st.session_state["places"])
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Sign up failed (username may already exist).")
         return
@@ -1237,7 +1206,6 @@ def run():
     if page == "Trip Planner":
         page_trip_planner()
     elif page == "Dashboard":
-        # simple dashboard summary
         st.markdown("<div class='card'><h3 style='margin:0;color:#e6e6e6'>Dashboard</h3></div>", unsafe_allow_html=True)
         total = len(st.session_state["places"])
         favs = sum(1 for p in st.session_state["places"] if p.get("favorite"))
