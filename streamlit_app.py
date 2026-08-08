@@ -32,6 +32,33 @@ from streamlit_folium import st_folium
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
 
+# rbac.py
+import hashlib
+from database import get_db_connection
+
+ROLES = {
+    "viewer": ["read", "review"],
+    "planner": ["read", "review", "create_place", "plan_trip"],
+    "approver": ["read", "review", "create_place", "plan_trip", "approve_itinerary", "manage_categories"],
+    "admin": ["read", "review", "create_place", "plan_trip", "approve_itinerary", "manage_categories", "admin_panel"]
+}
+
+def get_user_role(username: str) -> str:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT role FROM users WHERE username = %s", (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row["role"] if row else "viewer"
+
+def check_permission(username: str, action: str) -> bool:
+    role = get_user_role(username)
+    allowed_actions = ROLES.get(role, [])
+    return action in allowed_actions
+
+
+
 # -------------------------
 # Configuration
 # -------------------------
