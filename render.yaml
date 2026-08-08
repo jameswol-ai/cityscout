@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: cityscout-app
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r requirements.txt && python database.py"
+    startCommand: "streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0"
+    disk:
+      name: cityscout-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: USER_DATA_DIR
+        value: /var/data/user_data
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cityscout-db
+          property: connectionString
+
+databases:
+  - name: cityscout-db
+    plan: free
+    region: oregon
