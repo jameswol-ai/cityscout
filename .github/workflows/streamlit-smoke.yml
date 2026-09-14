@@ -22,10 +22,15 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt pytest
 
       - name: Compile Python sources
         run: python -m compileall -q .
+
+      - name: Run regression tests
+        env:
+          USER_DATA_DIR: /tmp/cityscout-test-user-data
+        run: pytest -q
 
       - name: Import CityScout modules
         env:
