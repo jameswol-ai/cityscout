@@ -1,5 +1,6 @@
 """Centralized CityScout configuration."""
 from __future__ import annotations
+
 import os
 
 AUTH_URL = os.getenv("AUTH_URL", "http://localhost:8000")
@@ -27,5 +28,3 @@ PAGES = [
     "Categories",
     "Settings",
 ]
-
-os.makedirs(USER_DATA_DIR, exist_ok=True)
