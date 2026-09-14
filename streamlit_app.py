@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import streamlit as st
 
+# Keep page configuration as the first Streamlit API call.
+st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
+
 from modules.auth import (
     call_auth_login,
     create_local_user,
@@ -11,7 +14,7 @@ from modules.auth import (
     verify_local_user,
     verify_token,
 )
-from modules.config import DEFAULT_CATEGORIES
+from modules.config import DEFAULT_CATEGORIES, PAGES
 from modules.storage import load_user_places
 from modules.ui import inject_css, render_logo, sidebar_navigation
 from modules.pages import (
@@ -28,7 +31,20 @@ from modules.pages import (
 )
 from modules.city_explorer import render_city_explorer
 
-st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
+
+PAGE_RENDERERS = {
+    "Trip Planner": page_trip_planner,
+    "City Explorer": render_city_explorer,
+    "Architecture & Urban Design": page_architecture,
+    "AI CityScout": page_ai_cityscout,
+    "Dashboard": page_dashboard,
+    "Explore": page_explore,
+    "Add Place": page_add_place,
+    "Places": page_places,
+    "Share": page_share,
+    "Categories": page_categories,
+    "Settings": page_settings,
+}
 
 
 def initialize_session() -> None:
@@ -38,11 +54,12 @@ def initialize_session() -> None:
         "places": [],
         "categories": list(DEFAULT_CATEGORIES),
         "auth_mode": None,
-        "page": "Trip Planner",
+        "page": PAGES[0] if PAGES else "Trip Planner",
         "last_route": None,
         "trip_templates": {},
         "share_tokens": {},
         "explore_results": [],
+        "ai_cityscout_history": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -110,27 +127,22 @@ def validate_session() -> bool:
 def render_app() -> None:
     inject_css()
     sidebar_navigation()
-    if st.sidebar.button("Logout"):
+
+    if st.sidebar.button("Logout", key="sidebar_logout"):
         logout_user()
         st.rerun()
 
-    if not st.session_state.get("places") and st.session_state.get("username"):
-        st.session_state.places = load_user_places(st.session_state.username)
+    username = st.session_state.get("username")
+    if username:
+        st.session_state.places = load_user_places(username)
 
-    pages = {
-        "Trip Planner": page_trip_planner,
-        "City Explorer": render_city_explorer,
-        "Architecture & Urban Design": page_architecture,
-        "AI CityScout": page_ai_cityscout,
-        "Dashboard": page_dashboard,
-        "Explore": page_explore,
-        "Add Place": page_add_place,
-        "Places": page_places,
-        "Share": page_share,
-        "Categories": page_categories,
-        "Settings": page_settings,
-    }
-    pages.get(st.session_state.get("page"), page_trip_planner)()
+    page = st.session_state.get("page", "Trip Planner")
+    renderer = PAGE_RENDERERS.get(page)
+    if renderer is None:
+        st.session_state.page = "Trip Planner"
+        st.warning(f"Unknown page '{page}'. Returning to Trip Planner.")
+        renderer = page_trip_planner
+    renderer()
 
 
 def run() -> None:
