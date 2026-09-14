@@ -1,0 +1,40 @@
+cityscout/
+│
+├── streamlit_app.py
+│
+├── modules/
+│   ├── explorer.py
+│   ├── places.py
+│   ├── maps.py
+│   ├── routing.py
+│   ├── architecture.py
+│   ├── urban_design.py
+│   ├── trip_planner.py
+│   ├── trip_budget.py
+│   ├── favorites.py
+│   ├── city_dashboard.py
+│   ├── ai_cityscout.py
+│   └── settings.py
+│
+├── services/
+│   ├── places_service.py
+│   ├── geocoding_service.py
+│   ├── routing_service.py
+│   ├── maps_service.py
+│   ├── auth_service.py
+│   └── storage_service.py
+│
+├── components/
+│   ├── sidebar.py
+│   ├── cards.py
+│   ├── maps.py
+│   ├── charts.py
+│   └── forms.py
+│
+├── data/
+│
+├── auth_server/
+├── proxy-server/
+│
+├── requirements.txt
+└── README.md
