@@ -21,6 +21,7 @@ PAGES = [
     "Architecture & Urban Design",
     "Building Design Cockpit",
     "Structural Design Cockpit",
+    "Lateral Design Cockpit",
     "AI CityScout",
     "Dashboard",
     "Explore",
