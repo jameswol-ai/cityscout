@@ -15,7 +15,6 @@ APP_SVG_LOGO = """
 </svg>
 """
 
-
 def inject_css():
     st.markdown(f"""
     <style>
@@ -29,17 +28,14 @@ def inject_css():
     </style>
     """, unsafe_allow_html=True)
 
-
 def render_logo(container=None):
-    target = container or st
+    target = st if container is None else container
     target.markdown("<div class='logo-top'>", unsafe_allow_html=True)
     target.markdown(APP_SVG_LOGO.format(color=APP_PRIMARY), unsafe_allow_html=True)
     target.markdown("</div>", unsafe_allow_html=True)
 
-
 def page_header(title: str):
     st.markdown(f"<div class='card'><h3 style='margin:0;color:#e6e6e6'>{title}</h3></div>", unsafe_allow_html=True)
-
 
 def sidebar_navigation():
     render_logo(st.sidebar)
@@ -47,15 +43,15 @@ def sidebar_navigation():
     current = st.session_state.get("page", "Trip Planner")
     if current not in PAGES:
         current = PAGES[0]
-    choice = st.sidebar.radio("Pages", PAGES, index=PAGES.index(current))
+    choice = st.sidebar.radio("Pages", PAGES, index=PAGES.index(current), key="page_navigation")
     st.session_state.page = choice
     st.sidebar.markdown("---")
-    if st.sidebar.button("Add sample place"):
+    if st.sidebar.button("Add sample place", key="add_sample_place"):
         add_place("Sample Place", 0.3476, 32.5825, "Sample", category="Attractions", cost_tier="$$")
         st.sidebar.success("Sample place added")
-    if st.sidebar.button("Export all places (CSV)"):
+    if st.sidebar.button("Export all places (CSV)", key="export_places_csv"):
         csv = pd.DataFrame(st.session_state.get("places", [])).to_csv(index=False).encode("utf-8")
-        st.sidebar.download_button("Download CSV", data=csv, file_name="places.csv", mime="text/csv")
+        st.sidebar.download_button("Download CSV", data=csv, file_name="places.csv", mime="text/csv", key="download_places_csv")
     st.sidebar.markdown("---")
     if st.session_state.get("username"):
         st.sidebar.markdown(f"**User:** {st.session_state.username}")
