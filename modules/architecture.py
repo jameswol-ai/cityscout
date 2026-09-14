@@ -6,8 +6,8 @@ engineering, environmental, or fire-safety review.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from math import radians, sin, cos, asin, sqrt
+from dataclasses import asdict, dataclass
+from math import asin, cos, isfinite, radians, sin, sqrt
 from typing import Any, Iterable
 
 
@@ -25,25 +25,56 @@ class SiteParameters:
     orientation_deg: float = 0.0
 
 
+def _finite_number(value: Any, default: float = 0.0) -> float:
+    """Return a finite numeric value, falling back safely for bad input."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if isfinite(number) else default
+
+
+def _valid_lat_lon(lat: Any, lon: Any) -> tuple[float, float] | None:
+    latitude = _finite_number(lat, float("nan"))
+    longitude = _finite_number(lon, float("nan"))
+    if not (isfinite(latitude) and isfinite(longitude)):
+        return None
+    if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
+        return None
+    return latitude, longitude
+
+
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return great-circle distance in kilometres for valid coordinates."""
+    first = _valid_lat_lon(lat1, lon1)
+    second = _valid_lat_lon(lat2, lon2)
+    if first is None or second is None:
+        return float("inf")
     r = 6371.0088
-    p1, p2 = radians(lat1), radians(lat2)
-    dp, dl = radians(lat2 - lat1), radians(lon2 - lon1)
+    p1, p2 = radians(first[0]), radians(second[0])
+    dp = radians(second[0] - first[0])
+    dl = radians(second[1] - first[1])
     a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    a = max(0.0, min(1.0, a))
     return 2 * r * asin(sqrt(a))
 
 
 def site_metrics(params: SiteParameters) -> dict[str, float]:
-    area = max(0.0, params.site_area_m2)
-    coverage = max(0.0, min(100.0, params.site_coverage_pct)) / 100.0
-    green = max(0.0, min(100.0, params.green_ratio_pct)) / 100.0
+    """Calculate transparent concept-stage development metrics."""
+    area = max(0.0, _finite_number(params.site_area_m2))
+    coverage = max(0.0, min(100.0, _finite_number(params.site_coverage_pct))) / 100.0
+    green = max(0.0, min(100.0, _finite_number(params.green_ratio_pct))) / 100.0
+    floors = max(1, int(_finite_number(params.floors, 1.0)))
+    floor_height = max(0.0, _finite_number(params.floor_height_m))
+    parking_rate = max(0.0, _finite_number(params.parking_per_100m2))
+
     footprint = area * coverage
-    gross_floor_area = footprint * max(1, int(params.floors))
+    gross_floor_area = footprint * floors
     green_area = area * green
     paved_or_other = max(0.0, area - footprint - green_area)
-    building_height = max(0, int(params.floors)) * max(0.0, params.floor_height_m)
+    building_height = floors * floor_height
     far = gross_floor_area / area if area else 0.0
-    parking_spaces = gross_floor_area / 100.0 * max(0.0, params.parking_per_100m2)
+    parking_spaces = gross_floor_area / 100.0 * parking_rate
     return {
         "site_area_m2": area,
         "building_footprint_m2": footprint,
@@ -70,7 +101,7 @@ def urban_indicators(params: SiteParameters) -> dict[str, Any]:
     return {"scores": scores, "metrics": m}
 
 
-def classify_land_use(places: Iterable[dict[str, Any]]) -> dict[str, int]:
+def classify_land_use(places: Iterable[dict[str, Any]] | None) -> dict[str, int]:
     counts: dict[str, int] = {}
     mapping = {
         "Food": "Commercial",
@@ -80,33 +111,51 @@ def classify_land_use(places: Iterable[dict[str, Any]]) -> dict[str, int]:
         "Parks": "Open Space",
         "Transit": "Transport",
     }
-    for place in places:
-        category = place.get("category", "Other")
+    for place in places or []:
+        if not isinstance(place, dict):
+            continue
+        category = str(place.get("category") or "Other").strip() or "Other"
         key = mapping.get(category, "Other")
         counts[key] = counts.get(key, 0) + 1
     return counts
 
 
-def walkability_score(places: list[dict[str, Any]], center_lat: float, center_lon: float) -> dict[str, float]:
-    if not places:
+def walkability_score(places: list[dict[str, Any]] | None, center_lat: float, center_lon: float) -> dict[str, float]:
+    """Calculate a simple proximity-based walkability indicator."""
+    center = _valid_lat_lon(center_lat, center_lon)
+    if center is None:
         return {"score": 0.0, "within_400m": 0, "within_800m": 0, "average_distance_km": 0.0}
-    distances = []
-    for place in places:
-        try:
-            distances.append(haversine_km(center_lat, center_lon, float(place["latitude"]), float(place["longitude"])))
-        except (KeyError, TypeError, ValueError):
+
+    distances: list[float] = []
+    for place in places or []:
+        if not isinstance(place, dict):
             continue
+        coords = _valid_lat_lon(place.get("latitude"), place.get("longitude"))
+        if coords is None:
+            continue
+        distance = haversine_km(center[0], center[1], coords[0], coords[1])
+        if isfinite(distance):
+            distances.append(distance)
+
     if not distances:
         return {"score": 0.0, "within_400m": 0, "within_800m": 0, "average_distance_km": 0.0}
+
     within_400 = sum(d <= 0.4 for d in distances)
     within_800 = sum(d <= 0.8 for d in distances)
     score = min(100.0, (within_400 / len(distances)) * 60 + (within_800 / len(distances)) * 40)
-    return {"score": score, "within_400m": within_400, "within_800m": within_800, "average_distance_km": sum(distances) / len(distances)}
+    return {
+        "score": score,
+        "within_400m": within_400,
+        "within_800m": within_800,
+        "average_distance_km": sum(distances) / len(distances),
+    }
 
 
 def solar_guidance(latitude: float, orientation_deg: float) -> dict[str, str]:
-    orientation = orientation_deg % 360
-    if latitude >= 0:
+    """Provide high-level solar-orientation guidance."""
+    latitude_value = _finite_number(latitude)
+    orientation = _finite_number(orientation_deg) % 360
+    if latitude_value >= 0:
         preferred = "South / southeast façades generally provide strong winter solar access; control summer gains with shading."
     else:
         preferred = "North / northeast façades generally provide strong winter solar access; control summer gains with shading."
@@ -119,13 +168,14 @@ def solar_guidance(latitude: float, orientation_deg: float) -> dict[str, str]:
     return {"guidance": preferred, "orientation_note": note}
 
 
-def build_analysis(params: SiteParameters, places: list[dict[str, Any]], center: tuple[float, float] | None = None) -> dict[str, Any]:
+def build_analysis(params: SiteParameters, places: list[dict[str, Any]] | None, center: tuple[float, float] | None = None) -> dict[str, Any]:
+    """Build the complete concept-stage architecture analysis."""
     result = urban_indicators(params)
     result["land_use"] = classify_land_use(places)
-    if center:
+    if center and len(center) == 2:
         result["walkability"] = walkability_score(places, center[0], center[1])
     else:
         result["walkability"] = {"score": 0.0, "within_400m": 0, "within_800m": 0, "average_distance_km": 0.0}
-    result["solar"] = solar_guidance(params.orientation_deg)
+    result["solar"] = solar_guidance(0.0, params.orientation_deg)
     result["parameters"] = asdict(params)
     return result
