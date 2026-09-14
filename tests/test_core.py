@@ -6,6 +6,8 @@ import math
 from modules.architecture import SiteParameters, build_analysis, haversine_km, walkability_score
 from modules.gis import build_city_map, city_metrics, valid_places
 from modules.massing import build_massing_options, select_massing_option
+from modules.parametric_design import core_model, floor_plate_dimensions, generate_design_options
+from modules.building_systems import circulation_model, system_summary, vertical_core_schedule
 from modules.spatial_intelligence import catchment_counts, category_gaps, density_hotspots, spatial_report
 from modules.trip import nearest_neighbor_order, two_opt_improve
 
@@ -47,6 +49,27 @@ def test_massing_engine_produces_comparable_options():
     assert all(o["footprint_m2"] > 0 and o["gfa_m2"] > 0 for o in options)
     assert select_massing_option(options, "vertical")["option"] == "Vertical"
     assert select_massing_option(options, "missing")["option"] == "Compact"
+
+
+def test_parametric_design_is_bounded_and_geometric():
+    dims = floor_plate_dimensions(1000, 1.5)
+    assert dims["area_m2"] == 1000 and dims["width_m"] > 0 and dims["depth_m"] > 0
+    core = core_model(1000, 12)
+    assert core["core_area_m2"] == 120 and core["core_width_m"] > 0
+    designs = generate_design_options(SiteParameters(site_area_m2=2000, site_coverage_pct=40, floors=4), "Balanced", 12, 1.4)
+    assert len(designs) == 3
+    assert all(0 <= d["design_score"] <= 100 for d in designs)
+
+
+def test_building_systems_produce_safe_conceptual_outputs():
+    vertical = vertical_core_schedule(4000, 4)
+    assert vertical["floors"] == 4
+    assert vertical["lifts"] >= 1 and vertical["stairs"] >= 1 and vertical["service_shafts"] >= 1
+    circ = circulation_model(1000, 120, 12)
+    assert circ["usable_program_area_m2"] > 0
+    assert 0 < circ["usable_efficiency_pct"] < 100
+    summary = system_summary(1000, 120, 4, 4000)
+    assert "vertical" in summary and "circulation" in summary
 
 
 def test_spatial_intelligence_handles_empty_single_clustered_data():
