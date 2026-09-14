@@ -8,6 +8,7 @@ from modules.gis import build_city_map, city_metrics, valid_places
 from modules.massing import build_massing_options, select_massing_option
 from modules.parametric_design import core_model, floor_plate_dimensions, generate_design_options
 from modules.building_systems import circulation_model, system_summary, vertical_core_schedule
+from modules.lateral_design import lateral_summary, lateral_system_options, wind_seismic_proxy
 from modules.spatial_intelligence import catchment_counts, category_gaps, density_hotspots, spatial_report
 from modules.trip import nearest_neighbor_order, two_opt_improve
 
@@ -70,6 +71,16 @@ def test_building_systems_produce_safe_conceptual_outputs():
     assert 0 < circ["usable_efficiency_pct"] < 100
     summary = system_summary(1000, 120, 4, 4000)
     assert "vertical" in summary and "circulation" in summary
+
+
+def test_lateral_engine_is_bounded():
+    options = lateral_system_options(120, 30, 20)
+    assert len(options) == 4
+    assert all(0 <= item["stability_score"] <= 100 for item in options)
+    actions = wind_seismic_proxy(120, 30, 40, 0.2)
+    assert actions["wind_pressure_kpa"] > 0 and actions["base_shear_proxy"] > 0
+    result = lateral_summary(120, 30, 20, 40, 0.2, "Dual system")
+    assert result["selected"]["system"] == "Dual system"
 
 
 def test_spatial_intelligence_handles_empty_single_clustered_data():
