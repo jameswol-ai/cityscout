@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-from modules.gis import build_city_map, city_metrics
+from .gis import build_city_map, city_metrics
 
 
 def render_city_explorer() -> None:
@@ -33,7 +33,7 @@ def render_city_explorer() -> None:
         show_heatmap=show_heatmap,
         cluster_markers=cluster_markers,
     )
-    st_folium(fmap, width=None, height=560, key="city_explorer_map")
+    st_folium(fmap, width=900, height=560, key="city_explorer_map")
 
     if metrics["category_counts"]:
         st.markdown("### City composition")
