@@ -13,6 +13,7 @@ from .places import add_place, update_place, delete_place, create_share_token, p
 from .storage import load_user_places, user_media_dir
 from .trip import estimate_trip_costs, compute_distance_matrix, nearest_neighbor_order, two_opt_improve, build_route_polyline_coords, export_gpx
 from .ui import page_header
+from .urban_design import page_architecture
 
 
 def page_share():
