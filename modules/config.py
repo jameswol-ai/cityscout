@@ -17,6 +17,7 @@ DEFAULT_CATEGORIES = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "
 PAGES = [
     "Trip Planner",
     "City Explorer",
+    "Architecture & Urban Design",
     "Dashboard",
     "Explore",
     "Add Place",
