@@ -1,6 +1,5 @@
 """Centralized CityScout configuration."""
 from __future__ import annotations
-
 import os
 
 AUTH_URL = os.getenv("AUTH_URL", "http://localhost:8000")
@@ -18,6 +17,8 @@ DEFAULT_CATEGORIES = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "
 PAGES = [
     "Trip Planner",
     "City Explorer",
+    "Spatial Intelligence",
+    "City Intelligence",
     "Architecture & Urban Design",
     "AI CityScout",
     "Dashboard",
