@@ -14,6 +14,7 @@ from modules.city_explorer import render_city_explorer
 from modules.spatial_dashboard import render_spatial_intelligence
 from modules.intelligence import render_city_intelligence
 from modules.building_design import render_building_design
+from modules.structural_design import render_structural_design
 
 PAGE_RENDERERS = {
     "Trip Planner": page_trip_planner,
@@ -22,6 +23,7 @@ PAGE_RENDERERS = {
     "City Intelligence": render_city_intelligence,
     "Architecture & Urban Design": page_architecture,
     "Building Design Cockpit": render_building_design,
+    "Structural Design Cockpit": render_structural_design,
     "AI CityScout": page_ai_cityscout,
     "Dashboard": page_dashboard,
     "Explore": page_explore,
