@@ -12,11 +12,13 @@ from modules.ui import inject_css, render_logo, sidebar_navigation
 from modules.pages import page_add_place, page_ai_cityscout, page_architecture, page_categories, page_dashboard, page_explore, page_places, page_settings, page_share, page_trip_planner
 from modules.city_explorer import render_city_explorer
 from modules.spatial_dashboard import render_spatial_intelligence
+from modules.intelligence import render_city_intelligence
 
 PAGE_RENDERERS = {
     "Trip Planner": page_trip_planner,
     "City Explorer": render_city_explorer,
     "Spatial Intelligence": render_spatial_intelligence,
+    "City Intelligence": render_city_intelligence,
     "Architecture & Urban Design": page_architecture,
     "AI CityScout": page_ai_cityscout,
     "Dashboard": page_dashboard,
