@@ -5,6 +5,7 @@ import math
 
 from modules.architecture import SiteParameters, build_analysis, haversine_km, walkability_score
 from modules.gis import build_city_map, city_metrics, valid_places
+from modules.spatial_intelligence import catchment_counts, category_gaps, density_hotspots, spatial_report
 from modules.trip import nearest_neighbor_order, two_opt_improve
 
 
@@ -59,3 +60,21 @@ def test_trip_optimizers_handle_small_and_unreachable_inputs():
 
     unreachable = [[0.0, float("inf")], [float("inf"), 0.0]]
     assert nearest_neighbor_order(unreachable, start=0) == [0]
+
+
+def test_spatial_intelligence_handles_empty_single_and_clustered_data():
+    assert catchment_counts([], 400)["coverage_pct"] == 0.0
+    assert spatial_report([])["dataset_places"] == 0
+    assert density_hotspots([{"name": "Only", "latitude": 0.3, "longitude": 32.5}], 400)[0]["nearby_places"] == 0
+
+    places = [
+        {"name": "Food A", "category": "Food", "latitude": 0.3000, "longitude": 32.5000},
+        {"name": "Park A", "category": "Parks", "latitude": 0.3010, "longitude": 32.5010},
+        {"name": "Food B", "category": "Food", "latitude": 0.3020, "longitude": 32.5020},
+        {"name": "Bad", "category": "Food", "latitude": float("nan"), "longitude": 32.5},
+    ]
+    report = spatial_report(places, ["Food", "Parks", "Transit"])
+    assert report["dataset_places"] == 3
+    assert report["catchment_400m"]["coverage_pct"] == 100.0
+    assert report["hotspots_400m"][0]["nearby_places"] >= 1
+    assert any(row["category"] == "Transit" for row in report["category_gaps"])
