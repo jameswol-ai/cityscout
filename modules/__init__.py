@@ -11,6 +11,7 @@ __all__ = [
     "urban_design",
     "massing",
     "site_planning",
+    "building_program",
     "gis",
     "spatial_intelligence",
     "spatial_dashboard",
