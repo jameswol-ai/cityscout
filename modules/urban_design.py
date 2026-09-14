@@ -12,6 +12,7 @@ from streamlit_folium import st_folium
 from .architecture import SiteParameters, build_analysis
 from .massing import build_massing_options
 from .parametric_design import floor_plate_polygon, generate_design_options
+from .building_systems import system_summary
 from .site_planning import site_plan_summary
 from .ui import page_header
 
@@ -54,11 +55,7 @@ def _massing_map(center: tuple[float, float], option: dict, orientation_deg: flo
     folium.TileLayer("CartoDB positron", name="Light Map").add_to(fmap)
     polygon = floor_plate_polygon(option, orientation_deg)
     cos_lat = max(0.2, abs(cos(radians(center[0]))))
-    coords = []
-    for x, y in polygon:
-        lat = center[0] + y / 111_320.0
-        lon = center[1] + x / (111_320.0 * cos_lat)
-        coords.append((lat, lon))
+    coords = [(center[0] + y / 111_320.0, center[1] + x / (111_320.0 * cos_lat)) for x, y in polygon]
     folium.Polygon(coords, tooltip=f"{option['option']} floor-plate concept", fill=True).add_to(fmap)
     folium.Marker(center, tooltip=f"{option['option']} centroid").add_to(fmap)
     return fmap
@@ -66,7 +63,7 @@ def _massing_map(center: tuple[float, float], option: dict, orientation_deg: flo
 
 def page_architecture() -> None:
     page_header("Architecture & Urban Design")
-    st.caption("Concept design cockpit for site planning, development intensity, massing, floor plates, cores, urban context, walkability and solar orientation. Outputs are assumption-driven and require project-specific professional verification.")
+    st.caption("Concept design cockpit for site planning, development intensity, massing, floor plates, cores, building systems, urban context, walkability and solar orientation. Outputs are assumption-driven and require project-specific professional verification.")
     places = _clean_places(st.session_state.get("places", []))
 
     with st.expander("01 · Site & development parameters", expanded=True):
@@ -91,11 +88,7 @@ def page_architecture() -> None:
 
     st.subheader("02 · Development envelope")
     cols = st.columns(5)
-    for col, label, key, fmt in [
-        (cols[0], "Footprint", "building_footprint_m2", ",.0f"), (cols[1], "GFA", "gross_floor_area_m2", ",.0f"),
-        (cols[2], "FAR", "floor_area_ratio", ".2f"), (cols[3], "Height", "building_height_m", ".1f"),
-        (cols[4], "Parking", "estimated_parking_spaces", ".0f"),
-    ]:
+    for col, label, key, fmt in [(cols[0], "Footprint", "building_footprint_m2", ",.0f"), (cols[1], "GFA", "gross_floor_area_m2", ",.0f"), (cols[2], "FAR", "floor_area_ratio", ".2f"), (cols[3], "Height", "building_height_m", ".1f"), (cols[4], "Parking", "estimated_parking_spaces", ".0f")]:
         suffix = " m²" if "m2" in key else ""
         col.metric(label, format(metrics[key], fmt) + suffix)
 
@@ -149,12 +142,29 @@ def page_architecture() -> None:
     else:
         st.info("Add a saved place with valid coordinates to visualize the rotated conceptual floor plate.")
 
-    st.subheader("05 · Urban performance dashboard")
-    score_df = pd.DataFrame([{ "Indicator": str(k).replace("_", " ").title(), "Score": float(v), "Assessment": _status(float(v)) } for k, v in scores.items() if isinstance(v, (int, float)) and isfinite(float(v))])
+    st.subheader("05 · Building systems & circulation")
+    systems = system_summary(selected_design["footprint_m2"], selected_design["core_area_m2"], selected_design["floors"], selected_design["gfa_m2"])
+    vertical = systems["vertical"]
+    circ = systems["circulation"]
+    vc = st.columns(5)
+    vc[0].metric("Concept population / level", f"{vertical['conceptual_population']:,.0f}")
+    vc[1].metric("Lifts", f"{vertical['lifts']}")
+    vc[2].metric("Stairs", f"{vertical['stairs']}")
+    vc[3].metric("Service shafts", f"{vertical['service_shafts']}")
+    vc[4].metric("Vertical cores", f"{vertical['vertical_core_count']}")
+    cc = st.columns(4)
+    cc[0].metric("Circulation", f"{circ['circulation_area_m2']:,.1f} m²")
+    cc[1].metric("Usable program", f"{circ['usable_program_area_m2']:,.1f} m²")
+    cc[2].metric("Usable efficiency", f"{circ['usable_efficiency_pct']:.1f}%")
+    cc[3].metric("Core area", f"{circ['core_area_m2']:,.1f} m²")
+    st.info(str(vertical["note"]))
+
+    st.subheader("06 · Urban performance dashboard")
+    score_df = pd.DataFrame([{"Indicator": str(k).replace("_", " ").title(), "Score": float(v), "Assessment": _status(float(v))} for k, v in scores.items() if isinstance(v, (int, float)) and isfinite(float(v))])
     st.bar_chart(score_df.set_index("Indicator")[["Score"]], use_container_width=True)
     st.dataframe(score_df, use_container_width=True, hide_index=True)
 
-    st.subheader("06 · Sustainability & site efficiency")
+    st.subheader("07 · Sustainability & site efficiency")
     s = st.columns(4)
     s[0].metric("Green area", f"{metrics['green_area_m2']:,.0f} m²")
     s[1].metric("Open space", f"{metrics['open_space_pct']:.1f}%")
@@ -164,11 +174,11 @@ def page_architecture() -> None:
 
     left, right = st.columns(2)
     with left:
-        st.subheader("07 · Urban context")
+        st.subheader("08 · Urban context")
         land_use = analysis.get("land_use", {})
         st.dataframe(pd.DataFrame(list(land_use.items()), columns=["Context", "Places"]), use_container_width=True, hide_index=True) if land_use else st.info("Add saved places to populate contextual land-use indicators.")
     with right:
-        st.subheader("08 · Walkability")
+        st.subheader("09 · Walkability")
         walk = analysis.get("walkability", {})
         st.metric("Walkability index", f"{float(walk.get('score', 0.0)):.0f}/100")
         st.write(f"400 m catchment: **{int(walk.get('within_400m', 0))}** places")
@@ -176,7 +186,7 @@ def page_architecture() -> None:
         st.write(f"Average distance: **{float(walk.get('average_distance_km', 0.0)):.2f} km**")
         st.caption("Saved-place proximity proxy, not pedestrian level-of-service.")
 
-    st.subheader("09 · Site context & study radii")
+    st.subheader("10 · Site context & study radii")
     fmap = folium.Map(location=center or (0, 0), zoom_start=14 if center else 2, control_scale=True)
     folium.TileLayer("OpenStreetMap", name="Street Map").add_to(fmap)
     folium.TileLayer("CartoDB positron", name="Light Map").add_to(fmap)
@@ -189,16 +199,16 @@ def page_architecture() -> None:
     folium.LayerControl(collapsed=False).add_to(fmap)
     st_folium(fmap, width=1000, height=480, key="architecture_context_map")
 
-    st.subheader("10 · Solar & orientation")
+    st.subheader("11 · Solar & orientation")
     solar = analysis.get("solar", {})
     st.info(str(solar.get("guidance", "No solar guidance is available.")))
     st.caption(str(solar.get("orientation_note", "")))
 
-    st.subheader("11 · Design review priorities")
+    st.subheader("12 · Design review priorities")
     for recommendation in analysis.get("recommendations", []):
         st.write(f"• {recommendation}")
 
-    st.subheader("12 · Concept analysis report")
+    st.subheader("13 · Concept analysis report")
     report = pd.DataFrame([
         ["Site area", metrics["site_area_m2"], "m²"], ["Building footprint", metrics["building_footprint_m2"], "m²"],
         ["Gross floor area", metrics["gross_floor_area_m2"], "m²"], ["Floor area ratio", metrics["floor_area_ratio"], "ratio"],
@@ -207,7 +217,9 @@ def page_architecture() -> None:
         ["Setback envelope", metrics["setback_envelope_m2"], "m²"], ["Setback-limited footprint", metrics["setback_limited_footprint_m2"], "m²"],
         ["Setback reduction", metrics["setback_reduction_pct"], "%"], ["Open space", metrics["open_space_pct"], "%"],
         ["Selected net floor / level", selected_design["net_floor_area_m2"], "m²"], ["Selected core", selected_design["core_area_m2"], "m²"],
-        ["Selected design score", selected_design["design_score"], "/100"],
-    ], columns=["Parameter", "Value", "Unit"])
-    st.dataframe(report, use_container_width=True, hide_index=True)
-    st.download_button("Download architecture analysis CSV", report.to_csv(index=False).encode("utf-8"), "cityscout_architecture_analysis.csv", "text/csv", key="architecture_analysis_download")
+        ["Selected design score", selected_design["design_score"], "/100"], ["Concept population / level", vertical["conceptual_population"], "persons"],
+        ["Concept lifts", vertical["lifts"], "units"], ["Concept stairs", vertical["stairs"], "units"], ["Service shafts", vertical["service_shafts"], "units"],
+        ["Usable circulation efficiency", circ["usable_efficiency_pct"], "%"],
+    ], columns=["Metric", "Value", "Unit"])
+    st.dataframe(report.round(2), use_container_width=True, hide_index=True)
+    st.download_button("Download concept report CSV", report.to_csv(index=False), "cityscout_architecture_report.csv", "text/csv", key="architecture_report_csv")
