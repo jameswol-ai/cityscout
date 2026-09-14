@@ -16,6 +16,7 @@ from modules.storage import load_user_places
 from modules.ui import inject_css, render_logo, sidebar_navigation
 from modules.pages import (
     page_add_place,
+    page_ai_cityscout,
     page_architecture,
     page_categories,
     page_dashboard,
@@ -120,6 +121,7 @@ def render_app() -> None:
         "Trip Planner": page_trip_planner,
         "City Explorer": render_city_explorer,
         "Architecture & Urban Design": page_architecture,
+        "AI CityScout": page_ai_cityscout,
         "Dashboard": page_dashboard,
         "Explore": page_explore,
         "Add Place": page_add_place,
