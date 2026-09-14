@@ -48,6 +48,7 @@ PAGE_RENDERERS = {
 
 
 def initialize_session() -> None:
+    """Initialize session state without overwriting existing user state."""
     defaults = {
         "access_token": None,
         "username": None,
@@ -66,45 +67,71 @@ def initialize_session() -> None:
             st.session_state[key] = value
 
 
+def load_current_user_places() -> None:
+    """Refresh saved places for the active local or remote user."""
+    username = st.session_state.get("username")
+    if not username:
+        st.session_state.places = []
+        return
+    loaded = load_user_places(username)
+    st.session_state.places = loaded if isinstance(loaded, list) else []
+
+
+def authenticate(username: str, password: str) -> bool:
+    """Try remote authentication first, then the local fallback."""
+    if not username or not password:
+        return False
+
+    token = call_auth_login(username, password)
+    if token:
+        info = verify_token(token)
+        if info and info.get("username") == username:
+            st.session_state.access_token = token
+            st.session_state.username = username
+            st.session_state.auth_mode = "remote"
+            load_current_user_places()
+            return True
+
+    if verify_local_user(username, password):
+        st.session_state.access_token = None
+        st.session_state.username = username
+        st.session_state.auth_mode = "local"
+        load_current_user_places()
+        return True
+
+    return False
+
+
 def render_login() -> None:
     inject_css()
     render_logo()
-    st.markdown("<div class='small-muted'>Sign in or create an account to continue</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='small-muted'>Sign in or create an account to continue</div>",
+        unsafe_allow_html=True,
+    )
     ensure_demo_local_user()
 
     username = st.text_input("Username", key="login_user", placeholder="username")
-    password = st.text_input("Password", type="password", key="login_pass", placeholder="password")
+    password = st.text_input(
+        "Password", type="password", key="login_pass", placeholder="password"
+    )
     login_col, signup_col = st.columns(2)
 
     with login_col:
-        if st.button("Login", use_container_width=True):
-            if not username or not password:
-                st.error("Enter a username and password.")
-                return
-            token = call_auth_login(username, password)
-            if token:
-                info = verify_token(token)
-                if info and info.get("username") == username:
-                    st.session_state.access_token = token
-                    st.session_state.username = username
-                    st.session_state.auth_mode = "remote"
-                    st.session_state.places = load_user_places(username)
-                    st.rerun()
-            if verify_local_user(username, password):
-                st.session_state.access_token = None
-                st.session_state.username = username
-                st.session_state.auth_mode = "local"
-                st.session_state.places = load_user_places(username)
+        if st.button("Login", use_container_width=True, key="login_submit"):
+            if authenticate(username.strip(), password):
                 st.rerun()
-            st.error("Login failed. Check credentials.")
+            st.error("Login failed. Check your credentials.")
 
     with signup_col:
-        if st.button("Sign up", use_container_width=True):
-            if not username or not password:
+        if st.button("Sign up", use_container_width=True, key="signup_submit"):
+            clean_username = username.strip()
+            if not clean_username or not password:
                 st.error("Enter a username and password.")
                 return
-            if create_local_user(username, password):
-                st.session_state.username = username
+            if create_local_user(clean_username, password):
+                st.session_state.username = clean_username
+                st.session_state.access_token = None
                 st.session_state.auth_mode = "local"
                 st.session_state.places = []
                 st.rerun()
@@ -114,14 +141,20 @@ def render_login() -> None:
 
 
 def validate_session() -> bool:
-    token = st.session_state.get("access_token")
+    """Validate the remote token when present and keep local sessions usable."""
     username = st.session_state.get("username")
-    if token and username:
+    token = st.session_state.get("access_token")
+
+    if not username:
+        return False
+
+    if token:
         info = verify_token(token)
         if not info or info.get("username") != username:
             logout_user()
             return False
-    return bool(st.session_state.get("username"))
+
+    return True
 
 
 def render_app() -> None:
@@ -132,16 +165,15 @@ def render_app() -> None:
         logout_user()
         st.rerun()
 
-    username = st.session_state.get("username")
-    if username:
-        st.session_state.places = load_user_places(username)
+    load_current_user_places()
 
-    page = st.session_state.get("page", "Trip Planner")
-    renderer = PAGE_RENDERERS.get(page)
-    if renderer is None:
-        st.session_state.page = "Trip Planner"
-        st.warning(f"Unknown page '{page}'. Returning to Trip Planner.")
-        renderer = page_trip_planner
+    page = st.session_state.get("page")
+    if page not in PAGE_RENDERERS:
+        st.session_state.page = PAGES[0] if PAGES else "Trip Planner"
+        page = st.session_state.page
+        st.warning("The selected page is unavailable. Returning to Trip Planner.")
+
+    renderer = PAGE_RENDERERS.get(page, page_trip_planner)
     renderer()
 
 
