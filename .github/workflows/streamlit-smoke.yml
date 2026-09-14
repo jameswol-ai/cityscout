@@ -30,11 +30,13 @@ jobs:
       - name: Run regression tests
         env:
           USER_DATA_DIR: /tmp/cityscout-test-user-data
+          PYTHONPATH: .
         run: pytest -q
 
       - name: Import CityScout modules
         env:
           USER_DATA_DIR: /tmp/cityscout-user-data
+          PYTHONPATH: .
         run: |
           python - <<'PY'
           import importlib
@@ -63,6 +65,7 @@ jobs:
       - name: Start Streamlit
         env:
           USER_DATA_DIR: /tmp/cityscout-user-data
+          PYTHONPATH: .
         run: |
           nohup streamlit run streamlit_app.py \
             --server.headless true \
