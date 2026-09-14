@@ -12,6 +12,7 @@ import requests
 import streamlit as st
 
 from .architecture import SiteParameters, build_analysis
+from .gis import map_center
 from .intelligence import city_intelligence, category_table
 from .trip import estimate_trip_costs
 from .ui import page_header
@@ -41,60 +42,41 @@ def _mapped_places(places: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(place, dict):
             continue
         try:
-            lat = float(place.get("latitude"))
-            lon = float(place.get("longitude"))
+            lat, lon = float(place.get("latitude")), float(place.get("longitude"))
         except (TypeError, ValueError):
             continue
-        if not (math.isfinite(lat) and math.isfinite(lon)):
-            continue
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
             continue
         result.append({**place, "latitude": lat, "longitude": lon})
     return result
 
 
-def _place_context(places: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{
-        "name": p.get("name", "Unnamed"), "category": p.get("category", "Other"),
-        "latitude": p.get("latitude"), "longitude": p.get("longitude"),
-        "favorite": bool(p.get("favorite")), "cost_tier": p.get("cost_tier", "$$"),
-        "address": p.get("address", ""), "description": p.get("description", ""),
-    } for p in places[:MAX_CONTEXT_PLACES] if isinstance(p, dict)]
+def _place_context(places):
+    return [{"name": p.get("name", "Unnamed"), "category": p.get("category", "Other"), "latitude": p.get("latitude"), "longitude": p.get("longitude"), "favorite": bool(p.get("favorite")), "cost_tier": p.get("cost_tier", "$$"), "address": p.get("address", ""), "description": p.get("description", "")} for p in places[:MAX_CONTEXT_PLACES] if isinstance(p, dict)]
 
 
-def _distance_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    lat1, lon1 = float(a["latitude"]), float(a["longitude"])
-    lat2, lon2 = float(b["latitude"]), float(b["longitude"])
-    r = 6371.0088
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+def _distance_km(a, b):
+    lat1, lon1, lat2, lon2 = float(a["latitude"]), float(a["longitude"]), float(b["latitude"]), float(b["longitude"])
+    r = 6371.0088; p1, p2 = math.radians(lat1), math.radians(lat2); dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * r * math.asin(math.sqrt(max(0.0, min(1.0, h))))
 
 
-def spatial_summary(places: list[dict[str, Any]]) -> dict[str, Any]:
+def spatial_summary(places):
     valid = _mapped_places(places)
-    if len(valid) < 2:
-        return {"mapped_places": len(valid), "nearest_pair_km": None, "furthest_pair_km": None}
+    if len(valid) < 2: return {"mapped_places": len(valid), "nearest_pair_km": None, "furthest_pair_km": None}
     pairs = [(_distance_km(a, b), a.get("name", "Unnamed"), b.get("name", "Unnamed")) for i, a in enumerate(valid) for b in valid[i + 1:]]
     nearest, furthest = min(pairs), max(pairs)
     return {"mapped_places": len(valid), "nearest_pair_km": round(nearest[0], 3), "nearest_pair": [nearest[1], nearest[2]], "furthest_pair_km": round(furthest[0], 3), "furthest_pair": [furthest[1], furthest[2]]}
 
 
-def build_ai_context(places: list[dict[str, Any]], params: SiteParameters) -> dict[str, Any]:
+def build_ai_context(places, params):
     safe_places = _mapped_places(places)
-    analysis = build_analysis(params, safe_places)
+    center = map_center(safe_places) if safe_places else None
+    analysis = build_analysis(params, safe_places, center=center)
     intelligence = city_intelligence(safe_places)
     counts = pd.Series([p.get("category", "Other") or "Other" for p in safe_places]).value_counts().to_dict() if safe_places else {}
-    table = category_table(safe_places)
-    return {
-        "places": _place_context(safe_places), "place_count": len(safe_places),
-        "favorite_count": sum(bool(p.get("favorite")) for p in safe_places),
-        "category_counts": counts, "spatial_summary": spatial_summary(safe_places),
-        "city_intelligence": intelligence,
-        "category_intelligence": table.to_dict(orient="records"),
-        "site_analysis": analysis,
-    }
+    return {"places": _place_context(safe_places), "place_count": len(safe_places), "favorite_count": sum(bool(p.get("favorite")) for p in safe_places), "category_counts": counts, "spatial_summary": spatial_summary(safe_places), "city_intelligence": intelligence, "category_intelligence": category_table(safe_places).to_dict(orient="records"), "site_analysis": analysis}
 
 
 def find_nearest_places(places, origin, limit=5):
@@ -126,8 +108,7 @@ def build_quick_itinerary(places, start_name=None, limit=6):
     except (TypeError, ValueError): stop_limit = 6
     start = next((p for p in mapped if p.get("name") == start_name), None) if start_name else None
     start = start or next((p for p in mapped if p.get("favorite")), mapped[0])
-    remaining = [p for p in mapped if p is not start]
-    order = [start]
+    remaining = [p for p in mapped if p is not start]; order = [start]
     while remaining and len(order) < stop_limit:
         nxt = min(remaining, key=lambda p: _distance_km(order[-1], p)); order.append(nxt); remaining.remove(nxt)
     total_km = sum(_distance_km(a, b) for a, b in zip(order, order[1:]))
@@ -155,22 +136,18 @@ def run_agent_task(question, places, context):
     if intent == "itinerary": return {"intent": intent, "title": "AI Quick Itinerary", "message": "Built from saved mapped places, favoring a favorite as the starting point when available.", "data": build_quick_itinerary(places, limit=min(8, max(2, len(_mapped_places(places)))))}
     if intent == "site": return {"intent": intent, "title": "AI Site Analysis", "message": "Concept-stage development indicators from the current site parameters.", "data": context["site_analysis"]}
     if intent == "rank": return {"intent": intent, "title": "Top Saved Places", "message": "Ranked using favorites, description richness, and cost accessibility.", "data": rank_saved_places(places)[:10]}
-    if intent == "report":
-        return {"intent": intent, "title": "City Intelligence Report", "message": "Combined city, spatial, category, coverage, and site intelligence.", "data": {"summary": {"places": len(places), "favorites": context["favorite_count"], "categories": context["category_counts"]}, "spatial": context["spatial_summary"], "intelligence": context["city_intelligence"], "category_intelligence": context["category_intelligence"], "site": context["site_analysis"], "top_places": rank_saved_places(places)[:10]}}
+    if intent == "report": return {"intent": intent, "title": "City Intelligence Report", "message": "Combined city, spatial, category, coverage, and site intelligence.", "data": {"summary": {"places": len(places), "favorites": context["favorite_count"], "categories": context["category_counts"]}, "spatial": context["spatial_summary"], "intelligence": context["city_intelligence"], "category_intelligence": context["category_intelligence"], "site": context["site_analysis"], "top_places": rank_saved_places(places)[:10]}}
     return {"intent": intent, "title": "CityScout Summary", "message": "I can search nearby places, rank saved places, build an itinerary, analyze the site, or generate a city intelligence report.", "data": context["spatial_summary"]}
 
 
 def _local_response(mode, question, context):
     places, analysis, counts = context["places"], context["site_analysis"], context["category_counts"]
-    top_category = max(counts, key=counts.get) if counts else "No category yet"
-    walk, performance = analysis["walkability"], analysis["urban_performance"]
+    top_category = max(counts, key=counts.get) if counts else "No category yet"; walk = analysis["walkability"]; performance = analysis["urban_performance"]
     if mode == "Agent Mode":
-        result = run_agent_task(question, places, context)
-        return f"### {result['title']}\n\n{result['message']}\n\n" + json.dumps(result["data"], indent=2, default=str)
+        result = run_agent_task(question, places, context); return f"### {result['title']}\n\n{result['message']}\n\n" + json.dumps(result["data"], indent=2, default=str)
     if mode == "Place Recommendations": return f"### Recommendation snapshot\n\nYou have **{len(places)}** mapped places across **{len(counts)}** categories. The strongest category is **{top_category}**. Use the AI tools to rank places or build a quick itinerary."
     if mode == "Trip Advisor":
-        nearest = context["spatial_summary"].get("nearest_pair_km")
-        return f"### Trip strategy\n\nYou have **{len(places)}** mapped places. " + (f"The closest mapped pair is about **{nearest:.2f} km** apart. " if nearest is not None else "Add at least two mapped places for spatial advice. ") + "Use Quick Itinerary for a deterministic first pass, then Trip Planner for actual route optimization."
+        nearest = context["spatial_summary"].get("nearest_pair_km"); return f"### Trip strategy\n\nYou have **{len(places)}** mapped places. " + (f"The closest mapped pair is about **{nearest:.2f} km** apart. " if nearest is not None else "Add at least two mapped places for spatial advice. ") + "Use Quick Itinerary for a deterministic first pass, then Trip Planner for actual route optimization."
     if mode == "Site Analysis": return f"### Concept site analysis\n\nGross floor area: **{analysis['site_metrics']['gross_floor_area_m2']:,.0f} m²**. Estimated green area: **{analysis['site_metrics']['green_area_m2']:,.0f} m²**. Walkability: **{walk['score']:.0f}/100**.\n\nThese are concept-stage indicators, not statutory approvals."
     if mode == "Urban Design Review": return f"### Urban design review\n\nPedestrian access: **{performance['walkability']:.0f}/100**  \nGreen infrastructure: **{performance['green_infrastructure']:.0f}/100**  \nDevelopment intensity: **{performance['development_intensity']:.0f}/100**\n\nPrioritize active edges, shade, safe crossings, connected paths, clear entrances, and a legible public-to-private transition."
     return f"### City summary\n\nCityScout currently understands **{len(places)}** mapped places, **{context['favorite_count']}** favorites, and **{len(counts)}** categories. The concept site has a walkability score of **{walk['score']:.0f}/100**."
@@ -188,18 +165,14 @@ Current structured CityScout context:\n{context_text[:MAX_PROMPT_CHARS]}\n
 Rules: Answer from supplied context first. Distinguish observed data from recommendations. Never invent missing places, regulations, measurements, prices, or transport facts. Architecture and urban design advice is conceptual only, not statutory or engineering advice. Be concise and useful."""
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     try:
-        response = requests.post(endpoint, params={"key": GEMINI_API_KEY}, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=GEMINI_TIMEOUT)
-        response.raise_for_status(); payload = response.json(); candidates = payload.get("candidates") or []
+        response = requests.post(endpoint, params={"key": GEMINI_API_KEY}, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=GEMINI_TIMEOUT); response.raise_for_status(); payload = response.json(); candidates = payload.get("candidates") or []
         if not candidates: return None
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        text = "\n".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
-        return text or None
+        parts = (candidates[0].get("content") or {}).get("parts") or []; text = "\n".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip(); return text or None
     except (requests.RequestException, ValueError, TypeError, KeyError, IndexError): return None
 
 
 def generate_cityscout_response(mode, question, context, history=None):
-    generated = _gemini_response(mode, question, context, history or [])
-    return (generated, f"Gemini ({GEMINI_MODEL})") if generated else (_local_response(mode, question, context), "Local CityScout Insights")
+    generated = _gemini_response(mode, question, context, history or []); return (generated, f"Gemini ({GEMINI_MODEL})") if generated else (_local_response(mode, question, context), "Local CityScout Insights")
 
 
 def _init_ai_state():
@@ -227,8 +200,7 @@ def page_ai_cityscout():
         if result:
             st.markdown(f"#### {result.get('title', 'Agent result')}"); st.caption(result.get("message", "")); data = result.get("data", {}); st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True) if isinstance(data, list) else st.json(data)
             if result.get("intent") == "report": st.download_button("Download agent report", json.dumps(data, indent=2, default=str), "cityscout_agent_report.json", "application/json", key="ai_download_agent_report")
-    st.markdown("### AI Tools")
-    tool = st.selectbox("Choose an action", TOOLS, key="ai_tool")
+    st.markdown("### AI Tools"); tool = st.selectbox("Choose an action", TOOLS, key="ai_tool")
     if tool == "Find Nearest Places":
         names = [p.get("name", "Unnamed") for p in _mapped_places(places)]
         if names:
