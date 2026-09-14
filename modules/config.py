@@ -18,6 +18,7 @@ PAGES = [
     "Trip Planner",
     "City Explorer",
     "Architecture & Urban Design",
+    "AI CityScout",
     "Dashboard",
     "Explore",
     "Add Place",
