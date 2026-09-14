@@ -1,36 +1,35 @@
-"""Interactive GIS helpers for CityScout.
-
-The GIS layer is deliberately UI-light: it prepares map layers from the
-existing saved-place model and keeps geographic calculations reusable by
-future city intelligence features.
-"""
+"""Interactive GIS helpers for CityScout."""
 from __future__ import annotations
 
+from html import escape
 from math import cos, radians
 from typing import Iterable, Sequence
 
 import folium
 from folium.plugins import HeatMap, MarkerCluster
 
-
 DEFAULT_CENTER = (0.3476, 32.5825)
 
 
 def valid_places(places: Iterable[dict]) -> list[dict]:
-    """Return places with usable latitude/longitude values."""
-    result = []
-    for place in places:
+    """Return only mappings with finite, geographically valid coordinates."""
+    result: list[dict] = []
+    for place in places or []:
+        if not isinstance(place, dict):
+            continue
         try:
             lat = float(place.get("latitude"))
             lon = float(place.get("longitude"))
         except (TypeError, ValueError):
             continue
-        if -90 <= lat <= 90 and -180 <= lon <= 180:
-            result.append({**place, "latitude": lat, "longitude": lon})
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        result.append({**place, "latitude": lat, "longitude": lon})
     return result
 
 
 def map_center(places: Sequence[dict]) -> tuple[float, float]:
+    """Return the centroid of valid places or the neutral default center."""
     items = valid_places(places)
     if not items:
         return DEFAULT_CENTER
@@ -38,6 +37,11 @@ def map_center(places: Sequence[dict]) -> tuple[float, float]:
         sum(p["latitude"] for p in items) / len(items),
         sum(p["longitude"] for p in items) / len(items),
     )
+
+
+def _safe_text(value: object, fallback: str = "") -> str:
+    text = str(value or fallback).strip()
+    return escape(text)
 
 
 def build_city_map(
@@ -53,21 +57,27 @@ def build_city_map(
     if selected_category != "All":
         items = [p for p in items if p.get("category", "Other") == selected_category]
 
-    fmap = folium.Map(location=map_center(items), zoom_start=zoom_start, control_scale=True)
+    try:
+        zoom = max(1, min(19, int(zoom_start)))
+    except (TypeError, ValueError):
+        zoom = 12
+
+    fmap = folium.Map(location=map_center(items), zoom_start=zoom, control_scale=True)
     folium.TileLayer("OpenStreetMap", name="Street Map").add_to(fmap)
     folium.TileLayer("CartoDB positron", name="Light Map").add_to(fmap)
 
     target = MarkerCluster(name="Places") if cluster_markers else folium.FeatureGroup(name="Places")
     for place in items:
+        name = _safe_text(place.get("name"), "Unnamed place")
+        category = _safe_text(place.get("category"), "Other")
+        address = _safe_text(place.get("address"))
         favorite = " ⭐" if place.get("favorite") else ""
-        popup = (
-            f"<b>{place.get('name', 'Unnamed place')}</b>{favorite}<br>"
-            f"{place.get('category', 'Other')}<br>"
-            f"{place.get('address', '')}"
-        )
+        popup = f"<b>{name}</b>{favorite}<br>{category}"
+        if address:
+            popup += f"<br>{address}"
         folium.Marker(
             [place["latitude"], place["longitude"]],
-            tooltip=place.get("name", "Place"),
+            tooltip=name,
             popup=folium.Popup(popup, max_width=300),
         ).add_to(target)
     target.add_to(fmap)
@@ -85,7 +95,7 @@ def city_metrics(places: Sequence[dict]) -> dict:
     items = valid_places(places)
     categories: dict[str, int] = {}
     for place in items:
-        category = place.get("category") or "Other"
+        category = str(place.get("category") or "Other").strip() or "Other"
         categories[category] = categories.get(category, 0) + 1
 
     if len(items) >= 2:
