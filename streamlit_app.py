@@ -1,9 +1,4 @@
-"""CityScout Streamlit application entry point.
-
-The entry point intentionally contains only application wiring. Domain logic,
-services and page renderers live in ``modules/`` so CityScout can grow without
-turning this file into another monolith.
-"""
+"""CityScout Streamlit application entry point."""
 from __future__ import annotations
 
 import streamlit as st
@@ -29,6 +24,7 @@ from modules.pages import (
     page_share,
     page_trip_planner,
 )
+from modules.city_explorer import render_city_explorer
 
 st.set_page_config(page_title="CityScout", page_icon="🌆", layout="wide")
 
@@ -121,6 +117,7 @@ def render_app() -> None:
 
     pages = {
         "Trip Planner": page_trip_planner,
+        "City Explorer": render_city_explorer,
         "Dashboard": page_dashboard,
         "Explore": page_explore,
         "Add Place": page_add_place,
