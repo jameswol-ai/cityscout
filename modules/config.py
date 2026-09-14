@@ -9,7 +9,6 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 MEDIA_DIR_NAME = "media"
 BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 OSRM_ROUTE_TTL = int(os.getenv("OSRM_ROUTE_TTL", "3600"))
-
 APP_BG = "#000000"
 APP_PRIMARY = "#0b6efd"
 APP_FONT = "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial"
@@ -20,6 +19,7 @@ PAGES = [
     "Spatial Intelligence",
     "City Intelligence",
     "Architecture & Urban Design",
+    "Building Design Cockpit",
     "AI CityScout",
     "Dashboard",
     "Explore",
