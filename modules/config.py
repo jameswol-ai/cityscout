@@ -20,6 +20,7 @@ PAGES = [
     "City Intelligence",
     "Architecture & Urban Design",
     "Building Design Cockpit",
+    "Structural Design Cockpit",
     "AI CityScout",
     "Dashboard",
     "Explore",
