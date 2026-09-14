@@ -14,6 +14,16 @@ APP_BG = "#000000"
 APP_PRIMARY = "#0b6efd"
 APP_FONT = "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial"
 DEFAULT_CATEGORIES = ["Food", "Nightlife", "Shopping", "Attractions", "Parks", "Transit", "Other"]
-PAGES = ["Trip Planner", "Dashboard", "Explore", "Add Place", "Places", "Share", "Categories", "Settings"]
+PAGES = [
+    "Trip Planner",
+    "City Explorer",
+    "Dashboard",
+    "Explore",
+    "Add Place",
+    "Places",
+    "Share",
+    "Categories",
+    "Settings",
+]
 
 os.makedirs(USER_DATA_DIR, exist_ok=True)
