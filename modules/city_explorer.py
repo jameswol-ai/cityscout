@@ -31,22 +31,10 @@ def render_city_explorer() -> None:
     categories = ["All"] + sorted(metrics["category_counts"].keys())
     left, right = st.columns([1, 1])
     with left:
-        selected_category = st.selectbox(
-            "Category layer",
-            categories,
-            key="city_explorer_category",
-        )
+        selected_category = st.selectbox("Category layer", categories, key="city_explorer_category")
     with right:
-        show_heatmap = st.checkbox(
-            "Show density heatmap",
-            value=False,
-            key="city_explorer_heatmap",
-        )
-        cluster_markers = st.checkbox(
-            "Cluster markers",
-            value=True,
-            key="city_explorer_clusters",
-        )
+        show_heatmap = st.checkbox("Show density heatmap", value=False, key="city_explorer_heatmap")
+        cluster_markers = st.checkbox("Cluster markers", value=True, key="city_explorer_clusters")
 
     filtered_count = metrics["places"] if selected_category == "All" else metrics["category_counts"].get(selected_category, 0)
     st.caption(f"Showing {filtered_count} mapped place{'s' if filtered_count != 1 else ''} in the selected layer.")
@@ -57,7 +45,7 @@ def render_city_explorer() -> None:
         show_heatmap=show_heatmap,
         cluster_markers=cluster_markers,
     )
-    st_folium(fmap, width="100%", height=560, key="city_explorer_map")
+    st_folium(fmap, width=1100, height=560, key="city_explorer_map")
 
     if metrics["category_counts"]:
         st.markdown("### City composition")
