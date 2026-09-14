@@ -8,7 +8,8 @@ import pandas as pd
 import streamlit as st
 
 from .architecture import SiteParameters, build_analysis
-from .gis import city_metrics, valid_places
+from .gis import city_metrics, map_center, valid_places
+from .spatial_intelligence import spatial_report
 
 
 def _distance_km(a: dict, b: dict) -> float:
@@ -30,52 +31,42 @@ def _category_counts(items: list[dict]) -> dict[str, int]:
 
 
 def city_intelligence(places: list[dict]) -> dict:
-    """Build deterministic, data-only city intelligence metrics."""
+    """Build deterministic city and Spatial Intelligence metrics."""
     items = valid_places(places)
     metrics = city_metrics(items)
-    if len(items) < 2:
-        return {
-            **metrics,
-            "nearest_pair_km": None,
-            "average_nearest_km": None,
-            "walkability_proxy": None,
-            "land_use_mix": None,
-            "coverage_400m_proxy": None,
-        }
-
-    nearest: list[float] = []
-    minimum_pair = float("inf")
-    for index, place in enumerate(items):
-        distances = [_distance_km(place, other) for j, other in enumerate(items) if j != index]
-        if distances:
-            nearest.append(min(distances))
-        for other in items[index + 1 :]:
-            minimum_pair = min(minimum_pair, _distance_km(place, other))
-
-    average_nearest = mean(nearest) if nearest else None
-    # A transparent proxy based only on observed saved-place spacing. It is not
-    # a statutory walkability or transport-accessibility score.
-    walkability_proxy = None if average_nearest is None else max(0.0, min(100.0, 100.0 * (1.0 - average_nearest / 2.0)))
+    intelligence = {
+        **metrics,
+        "nearest_pair_km": None,
+        "average_nearest_km": None,
+        "walkability_proxy": None,
+        "land_use_mix": None,
+        "coverage_400m_proxy": None,
+    }
+    if len(items) >= 2:
+        nearest: list[float] = []
+        minimum_pair = float("inf")
+        for index, place in enumerate(items):
+            distances = [_distance_km(place, other) for j, other in enumerate(items) if j != index]
+            if distances:
+                nearest.append(min(distances))
+            for other in items[index + 1 :]:
+                minimum_pair = min(minimum_pair, _distance_km(place, other))
+        average_nearest = mean(nearest) if nearest else None
+        intelligence["average_nearest_km"] = average_nearest
+        intelligence["nearest_pair_km"] = minimum_pair if minimum_pair != float("inf") else None
+        intelligence["walkability_proxy"] = None if average_nearest is None else max(0.0, min(100.0, 100.0 * (1.0 - average_nearest / 2.0)))
+        covered = sum(any(_distance_km(place, other) <= 0.4 for other in items if other is not place) for place in items)
+        intelligence["coverage_400m_proxy"] = 100.0 * covered / len(items)
 
     counts = _category_counts(items)
     total = len(items)
-    shares = [count / total for count in counts.values()]
+    shares = [count / total for count in counts.values()] if total else []
     herfindahl = sum(share * share for share in shares)
-    land_use_mix = max(0.0, min(100.0, 100.0 * (1.0 - herfindahl)))
+    intelligence["land_use_mix"] = max(0.0, min(100.0, 100.0 * (1.0 - herfindahl))) if total else None
 
-    # Count places within 400 m of another saved place. This is a dataset
-    # coverage proxy, not a claim about actual population or service catchment.
-    covered = sum(any(_distance_km(place, other) <= 0.4 for other in items if other is not place) for place in items)
-    coverage_400m_proxy = 100.0 * covered / total
-
-    return {
-        **metrics,
-        "nearest_pair_km": minimum_pair if minimum_pair != float("inf") else None,
-        "average_nearest_km": average_nearest,
-        "walkability_proxy": walkability_proxy,
-        "land_use_mix": land_use_mix,
-        "coverage_400m_proxy": coverage_400m_proxy,
-    }
+    # Spatial Intelligence 2.0 remains explicitly dataset-based, not a claim about population or statutory service access.
+    intelligence["spatial_report"] = spatial_report(items, list(st.session_state.get("categories") or []))
+    return intelligence
 
 
 def category_table(places: list[dict]) -> pd.DataFrame:
@@ -89,12 +80,7 @@ def category_table(places: list[dict]) -> pd.DataFrame:
         favorites[category] = favorites.get(category, 0) + int(bool(place.get("favorite")))
     total = len(items)
     for category in sorted(counts):
-        rows.append({
-            "Category": category,
-            "Places": counts[category],
-            "Favorites": favorites[category],
-            "Share": counts[category] / total if total else 0.0,
-        })
+        rows.append({"Category": category, "Places": counts[category], "Favorites": favorites[category], "Share": counts[category] / total if total else 0.0})
     return pd.DataFrame(rows)
 
 
@@ -114,32 +100,24 @@ def site_suitability_score(places: list[dict], *, site_area_m2: float = 1000.0, 
         green = max(0.0, min(100.0, float(green_pct)))
     except (TypeError, ValueError):
         area, coverage, green = 1000.0, 40.0, 25.0
-
     mapped = len(valid_places(places))
     density_component = min(40.0, mapped * 4.0)
     green_component = min(30.0, green * 0.3)
     coverage_component = max(0.0, 30.0 - abs(coverage - 40.0) * 0.5)
     score = round(min(100.0, density_component + green_component + coverage_component), 1)
-    return {
-        "score": score,
-        "rating": "High" if score >= 70 else "Moderate" if score >= 45 else "Low",
-        "basis": "Conceptual heuristic using saved-place count, green ratio, and site coverage only.",
-        "site_area_m2": area,
-    }
+    return {"score": score, "rating": "High" if score >= 70 else "Moderate" if score >= 45 else "Low", "basis": "Conceptual heuristic using saved-place count, green ratio, and site coverage only.", "site_area_m2": area}
 
 
 def render_city_intelligence(places: list[dict]) -> None:
     """Render the City Intelligence dashboard."""
     st.markdown("<div class='card'><h3 style='margin:0'>City Intelligence Dashboard</h3></div>", unsafe_allow_html=True)
     st.caption("Deterministic analytics from your saved GIS dataset. Recommendations are kept separate from observed data.")
-
     intelligence = city_intelligence(places)
     a, b, c, d = st.columns(4)
     a.metric("Mapped Places", intelligence["places"])
     b.metric("Favorites", intelligence["favorites"])
     c.metric("Categories", intelligence["categories"])
     d.metric("Footprint", f"{intelligence['footprint_km2']:.1f} km²")
-
     if not places:
         st.info("Add places to build the city intelligence dataset.")
         return
@@ -148,10 +126,17 @@ def render_city_intelligence(places: list[dict]) -> None:
     e.metric("Nearest Place Pair", "N/A" if intelligence["nearest_pair_km"] is None else f"{intelligence['nearest_pair_km']:.2f} km")
     f.metric("Average Nearest Distance", "N/A" if intelligence["average_nearest_km"] is None else f"{intelligence['average_nearest_km']:.2f} km")
     g.metric("400 m Coverage Proxy", "N/A" if intelligence["coverage_400m_proxy"] is None else f"{intelligence['coverage_400m_proxy']:.0f}%")
-
     h, i = st.columns(2)
     h.metric("Spacing / Walkability Proxy", "N/A" if intelligence["walkability_proxy"] is None else f"{intelligence['walkability_proxy']:.0f}/100")
     i.metric("Land-use Mix", "N/A" if intelligence["land_use_mix"] is None else f"{intelligence['land_use_mix']:.0f}/100")
+
+    spatial = intelligence["spatial_report"]
+    c400, c800 = spatial["catchment_400m"], spatial["catchment_800m"]
+    st.markdown("### Spatial Intelligence 2.0")
+    s1, s2, s3 = st.columns(3)
+    s1.metric("400 m Dataset Coverage", f"{c400['coverage_pct']:.0f}%")
+    s2.metric("800 m Dataset Coverage", f"{c800['coverage_pct']:.0f}%")
+    s3.metric("Spatial Category Gaps", len(spatial["category_gaps"]))
 
     table = category_table(places)
     if not table.empty:
@@ -192,19 +177,9 @@ def render_city_intelligence(places: list[dict]) -> None:
         with p3:
             green = st.slider("Green ratio (%)", 0, 100, 25, key="intel_dev_green")
             parking = st.number_input("Parking / 100 m²", min_value=0.0, value=1.0, key="intel_parking")
-        analysis = build_analysis(
-            SiteParameters(
-                site_area_m2=area,
-                site_coverage_pct=coverage,
-                floors=int(floors),
-                floor_height_m=height,
-                green_ratio_pct=green,
-                parking_per_100m2=parking,
-            ),
-            places,
-        )
-        site_metrics = analysis.get("site_metrics", {})
+        analysis = build_analysis(SiteParameters(site_area_m2=area, site_coverage_pct=coverage, floors=int(floors), floor_height_m=height, green_ratio_pct=green, parking_per_100m2=parking), places, center=map_center(valid_places(places)) if valid_places(places) else None)
+        site_metrics = analysis.get("metrics", {})
         u1, u2, u3 = st.columns(3)
-        u1.metric("Developable Footprint", f"{site_metrics.get('buildable_footprint_m2', 0):,.0f} m²")
+        u1.metric("Building Footprint", f"{site_metrics.get('building_footprint_m2', 0):,.0f} m²")
         u2.metric("Gross Floor Area", f"{site_metrics.get('gross_floor_area_m2', 0):,.0f} m²")
-        u3.metric("Estimated Parking", f"{site_metrics.get('parking_spaces', 0):,.0f}")
+        u3.metric("Estimated Parking", f"{site_metrics.get('estimated_parking_spaces', 0):,.0f}")
